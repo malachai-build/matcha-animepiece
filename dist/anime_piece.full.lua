@@ -1998,18 +1998,41 @@ end
 -- Infos.Level is the real level; the player's Level attribute lags behind.
 function AP.level() return tonumber(statValue("Infos", "Level")) or 0 end
 function AP.money() return tonumber(statValue("Infos", "Money")) or 0 end
--- Current quest as a number (Quest.QuestId is "001", "2" or "None"), nil
--- when there is none or it is not a numbered quest.
+-- Quest.QuestId as a number when the game fills it in. Live on 2026-10-31
+-- it stayed "" through a whole accept of quest 003, so it is only a hint:
+-- InQuest and the quest text below are what tell the state.
 function AP.questId()
     local id = statValue("Quest", "QuestId")
     return tonumber(id)
 end
-function AP.questProgress() return tonumber(statValue("Quest", "Progress")) or 0 end
 
 function AP.boolAttribute(name)
     local value
     pcall(function() value = LocalPlayer:GetAttribute(name) end)
     return value == true
+end
+
+-- InQuest (bool attribute, safe to read) flips true on an accept the server
+-- took and false on Quit; a rejected accept (level too low) leaves it false.
+function AP.inQuest() return AP.boolAttribute("InQuest") end
+
+-- Text of the quest panel: "Defeat Higaro's bandits (0/5)". The title keeps
+-- the last quest's name after a quit, so only trust it while InQuest.
+function AP.questText()
+    local text
+    pcall(function()
+        local desc = LocalPlayer.PlayerGui.Interfaces.Screen.Quest.Current:FindFirstChild("Description")
+        text = desc and desc.Text
+    end)
+    return type(text) == "string" and text or ""
+end
+
+-- Kills done and needed, from the "(n/m)" in the quest text (Quest.Progress
+-- stays 0 while the panel counts).
+function AP.questProgress()
+    local done, need = string.match(AP.questText(), "%((%d+)/(%d+)%)")
+    if done then return tonumber(done), tonumber(need) end
+    return tonumber(statValue("Quest", "Progress")) or 0, nil
 end
 
 function AP.root()
@@ -2161,18 +2184,56 @@ for _, quest in ipairs(AP_QUESTS) do
 end
 
 AFQ_AREA_RADIUS = 700   -- studs around the quest's area marker that count as its spawn
-AFQ_ACCEPT_WAIT = 3     -- s for Quest.QuestId to change after an accept
-AFQ_ACCEPT_RETRY = 6    -- s between accept attempts for the same quest
+AFQ_ACCEPT_WAIT = 3     -- s for InQuest to flip after an accept or a quit
+AFQ_LOCK_TIME = 120     -- s a refused quest is skipped (a level-up clears it sooner)
 AFQ_TARGET_TIMEOUT = 25 -- s on one enemy before trying another (stuck / unreachable)
 AFQ_AREA_HEIGHT = 25    -- studs above the marker while waiting for respawns
 
--- Highest quest the current level allows.
+-- Boss quests whose text contains a mob target ("Defeat Robot King" holds
+-- "Robot"): never read them as that mob's quest.
+local BOSS_TEXT = { "robot king", "robot 15", "robot 16" }
+
+-- tracked: id of the quest AFQ accepted, kept while InQuest stays true.
+-- locked[id] = clock() when the server refused it (the level gate is server
+-- side: live, Lv 21 was refused 007 and 026 and took 003).
+AFQ = { tracked = nil, locked = {}, level = nil }
+
+-- Highest quest the level allows that the server has not just refused. The
+-- table levels are the enemies' tags; a refusal drops to the tier below
+-- until the next level-up, so a wrong tag costs one accept, not the farm.
 function afq_bestQuest(level)
+    local now = clock()
     local best
     for _, quest in ipairs(AP_QUESTS) do
-        if quest.level <= level then best = quest end
+        local lockedAt = AFQ.locked[quest.id]
+        if quest.level <= level and not (lockedAt and now - lockedAt < AFQ_LOCK_TIME) then
+            best = quest
+        end
     end
     return best
+end
+
+-- The active quest: nil when none, false when it is not one of AP_QUESTS
+-- (a boss, collect or hand-picked quest AFQ cannot tell apart).
+function afq_activeQuest()
+    if not AP.inQuest() then AFQ.tracked = nil return nil end
+    if AFQ.tracked then return QUEST_BY_ID[AFQ.tracked] end
+    local byId = QUEST_BY_ID[AP.questId() or -1]
+    if byId then return byId end
+    -- Taken before AFQ started: match the quest text against the targets.
+    local text = string.lower(AP.questText())
+    for _, boss in ipairs(BOSS_TEXT) do
+        if string.find(text, boss, 1, true) then return false end
+    end
+    local found, foundLen = false, 0
+    for _, quest in ipairs(AP_QUESTS) do
+        for _, name in ipairs(quest.targets) do
+            if #name > foundLen and string.find(text, string.lower(name), 1, true) then
+                found, foundLen = quest, #name
+            end
+        end
+    end
+    return found
 end
 
 -- Quest area: the Part in IgnoreList["Quest Indicator"] named by the quest
@@ -2191,39 +2252,43 @@ local function setStatus(text) AP.setLabel(S.apAfqLabel, "Auto Farm Quest: " .. 
 -- The quest Yes button sends Dialogue Event {"Quest", "001"}. The server
 -- accepts it from anywhere (verified 282 studs from the giver), so there is
 -- no flight to the NPC and no dialogue click.
-local lastAccept = { id = nil, at = -1e9 }
+-- Returns "accepted", "refused" (InQuest stayed false: level too low) or
+-- "unsent" (the remote failed; not the quest's fault, so no lock).
 function afq_accept(quest)
-    local now = clock()
-    if lastAccept.id == quest.id and now - lastAccept.at < AFQ_ACCEPT_RETRY then return false end
-    lastAccept.id, lastAccept.at = quest.id, now
     local id = string.format("%03d", quest.id)
-    safeRemote("Dialogue Event", AP.remote("Dialogue Event"), "FireServer", { "Quest", id })
+    if not safeRemote("Dialogue Event", AP.remote("Dialogue Event"), "FireServer", { "Quest", id }) then
+        return "unsent"
+    end
     local deadline = clock() + AFQ_ACCEPT_WAIT
     while alive() and clock() < deadline do
-        if AP.questId() == quest.id then return true end
+        if AP.inQuest() then AFQ.tracked = quest.id return "accepted" end
         task.wait(0.2)
     end
-    return AP.questId() == quest.id
+    if AP.inQuest() then AFQ.tracked = quest.id return "accepted" end
+    return "refused"
 end
 
--- Another quest is active (an older tier, or one the player took by hand):
--- quit it so the best one can be taken. The game keeps one quest at a time.
+-- Another quest is active (an older tier after a level-up, or one the
+-- player took by hand): quit it so the best one can be taken. The game
+-- keeps one quest at a time.
 function afq_quit()
     safeRemote("Quest Event", AP.remote("Quest Event"), "FireServer", "Quit")
     local deadline = clock() + AFQ_ACCEPT_WAIT
     while alive() and clock() < deadline do
-        if AP.questId() == nil then return true end
+        if not AP.inQuest() then AFQ.tracked = nil return true end
         task.wait(0.2)
     end
-    return AP.questId() == nil
+    return not AP.inQuest()
 end
 
--- Fight one enemy until it dies, the quest ends or changes, AFQ is switched
--- off or the fruit farm takes over.
+-- Fight one enemy until it dies, the quest ends, the level changes (a new
+-- tier may be open), AFQ is switched off or the fruit farm takes over.
 function afq_fight(quest, model, targetRoot)
     local started = clock()
+    local level = AFQ.level
     local function keep()
-        return alive() and S.apAfq and not S.apPaused and AP.questId() == quest.id
+        return alive() and S.apAfq and not S.apPaused and AFQ.tracked == quest.id
+            and AP.inQuest() and AP.level() == level
     end
     -- Fly in first; the swing then pins the root next to the target.
     local okPos, tpos = pcall(function() return targetRoot.Position end)
@@ -2257,18 +2322,32 @@ task.spawn(function()
         else
             wasOn = true
             local ok, err = pcall(function()
+                if not AP.stats() then setStatus("waiting for player data") task.wait(1) return end
                 local level = AP.level()
+                if AFQ.level ~= level then
+                    -- Level changed: tiers the server refused may be open now.
+                    if AFQ.level then setStatus(("level %d -> %d, checking quests"):format(AFQ.level, level)) end
+                    AFQ.level = level
+                    AFQ.locked = {}
+                end
                 local quest = afq_bestQuest(level)
-                if not quest then setStatus("no kill quest for level " .. level) task.wait(2) return end
-                local current = AP.questId()
-                if current ~= quest.id then
+                if not quest then setStatus("no kill quest the server takes at Lv " .. level) task.wait(2) return end
+                local current = afq_activeQuest()
+                if current ~= quest then
                     if current ~= nil then
-                        setStatus(("quitting quest %03d for %03d"):format(current, quest.id))
+                        setStatus(current and ("quitting quest %03d for %03d"):format(current.id, quest.id)
+                            or ("quitting other quest for %03d"):format(quest.id))
                         afq_quit()
                         return
                     end
                     setStatus(("accepting quest %03d (Lv %d)"):format(quest.id, quest.level))
-                    if not afq_accept(quest) then task.wait(1) end
+                    local result = afq_accept(quest)
+                    if result == "refused" then
+                        AFQ.locked[quest.id] = clock()
+                        warnThrottled("afq-refused", ("[laced.club] Auto Farm Quest: quest %03d refused at Lv %d, using a lower tier"):format(quest.id, level), 30)
+                    elseif result == "unsent" then
+                        task.wait(1)
+                    end
                     return
                 end
                 local area = afq_areaPosition(quest)
@@ -2288,7 +2367,8 @@ task.spawn(function()
                     end
                     return
                 end
-                setStatus(("%s (%d done)"):format(model.Name, AP.questProgress()))
+                local done, need = AP.questProgress()
+                setStatus(("%03d %s (%d/%s)"):format(quest.id, model.Name, done, need and tostring(need) or "?"))
                 afq_fight(quest, model, root)
             end)
             if not ok then

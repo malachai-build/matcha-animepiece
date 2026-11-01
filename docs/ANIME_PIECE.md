@@ -21,15 +21,22 @@ PlaceId `134039915751463`. Mapped live through the Matcha MCP on 2026-10-31.
 |---|---|---|
 | `Infos.Level` | IntValue | real level (the `Level` attribute lags) |
 | `Infos.Money` | IntValue | money |
-| `Quest.QuestId` | StringValue | current quest id without zero padding (`"2"` for quest `002`); `""` or missing when none |
-| `Quest.Progress` | IntValue | kills/items done on the current quest |
+| `Quest.QuestId` | StringValue | quest id without zero padding (`"2"` for quest `002`) when set; **stayed `""` through an accept of 003 (2026-10-31)**, so not a reliable signal |
+| `Quest.Progress` | IntValue | kills/items done; stayed 0 while the quest panel counted (use the panel's `(n/m)`) |
 | `Build.ActualFruit` | StringValue | eaten fruit, `"None"` when none |
 | `Build.ActualFightingStyle` | StringValue | e.g. `"Melee"` |
 | `Unlockeds.Fruits` | Folder | stored fruits |
 | `Infos.LastFruitTimeSpin` | (appears after the first spin) | gacha cooldown stamp |
 
-Player attribute `InQuest` (bool). Quest UI: `PlayerGui.Interfaces.Screen.Quest.Current.Header.Title`
-and `.Description` (`"... (9/10)"`).
+Player attribute `InQuest` (bool): true after an accept the server took, false after `Quit` or a refused
+accept. Quest UI: `PlayerGui.Interfaces.Screen.Quest.Current.Header.Title` and `...Current.Description`
+(`"Defeat Higaro's bandits (0/5)"`); the title keeps the last quest's name after a quit.
+Recommended quest for the level: `PlayerGui.Interfaces.Frames.QuestTrack.Frame.Background["Quest Name"]`
+and `.LevelRecomended` (`"Level 20+"`).
+
+**Level gate is server side**: the client dialogue modules (`ReplicatedStorage.Client.Utils.Dialogues.<NPC>`)
+only send `{"Quest", "003"}`. At Lv 21 the server refused 007 (Lv 45) and 026 (Lv 190) and took 003
+(InQuest unchanged on a refusal, no message).
 
 ## Remotes (`ReplicatedStorage.Remotes`)
 

@@ -46,18 +46,41 @@ end
 -- Infos.Level is the real level; the player's Level attribute lags behind.
 function AP.level() return tonumber(statValue("Infos", "Level")) or 0 end
 function AP.money() return tonumber(statValue("Infos", "Money")) or 0 end
--- Current quest as a number (Quest.QuestId is "001", "2" or "None"), nil
--- when there is none or it is not a numbered quest.
+-- Quest.QuestId as a number when the game fills it in. Live on 2026-10-31
+-- it stayed "" through a whole accept of quest 003, so it is only a hint:
+-- InQuest and the quest text below are what tell the state.
 function AP.questId()
     local id = statValue("Quest", "QuestId")
     return tonumber(id)
 end
-function AP.questProgress() return tonumber(statValue("Quest", "Progress")) or 0 end
 
 function AP.boolAttribute(name)
     local value
     pcall(function() value = LocalPlayer:GetAttribute(name) end)
     return value == true
+end
+
+-- InQuest (bool attribute, safe to read) flips true on an accept the server
+-- took and false on Quit; a rejected accept (level too low) leaves it false.
+function AP.inQuest() return AP.boolAttribute("InQuest") end
+
+-- Text of the quest panel: "Defeat Higaro's bandits (0/5)". The title keeps
+-- the last quest's name after a quit, so only trust it while InQuest.
+function AP.questText()
+    local text
+    pcall(function()
+        local desc = LocalPlayer.PlayerGui.Interfaces.Screen.Quest.Current:FindFirstChild("Description")
+        text = desc and desc.Text
+    end)
+    return type(text) == "string" and text or ""
+end
+
+-- Kills done and needed, from the "(n/m)" in the quest text (Quest.Progress
+-- stays 0 while the panel counts).
+function AP.questProgress()
+    local done, need = string.match(AP.questText(), "%((%d+)/(%d+)%)")
+    if done then return tonumber(done), tonumber(need) end
+    return tonumber(statValue("Quest", "Progress")) or 0, nil
 end
 
 function AP.root()

@@ -1927,7 +1927,7 @@ mainTab:AddToggle("ap_afq", {
 mainTab:AddInput("ap_weapon_slot", {
     Text = "Weapon Slot (1-0)", Default = tostring(S.apWeaponSlot), Numeric = true,
     Placeholder = "1", Column = 1,
-    Description = "Hotbar key of the weapon AFQ equips when you hold nothing (0 = slot 10). Needs Roblox focused.",
+    Description = "Hotbar key AFQ presses when your hand is empty (0 = slot 10); any tool, fruits included. The key only reaches Roblox while it is focused; once something is held AFQ runs unfocused.",
     Callback = function(v)
         local digit = tonumber(string.match(tostring(v or ""), "(%d)$"))
         if digit then S.apWeaponSlot = digit end
@@ -2134,53 +2134,45 @@ function AP.facing(fromPos, toPos)
     return CFrame.fromOrientation(0, math.atan2(-d.X, -d.Z), 0)
 end
 
--- True when the character holds a Tool (the server's M1 uses it).
+-- True when the character holds any Tool (the server's M1 uses it; fruits
+-- have M1 too, so they count).
 function AP.holdsTool()
     local char = LocalPlayer.Character
     if not char then return false end
     for _, child in ipairs(char:GetChildren()) do
-        if child.ClassName == "Tool" and not AP.FRUIT_SET[child.Name] then return true end
+        if child.ClassName == "Tool" then return true end
     end
     return false
 end
 
--- Equip the weapon in hotbar slot S.apWeaponSlot (1..9, 0 = slot 10) when
--- the character holds none: without a tool Combat Event does no damage.
--- Setting the tool's Parent from the client does not stick (live), so the
--- slot key is pressed, which only reaches Roblox while it is focused.
+-- Whatever the player holds is their weapon; only an empty hand is acted on
+-- (without a tool Combat Event does no damage). Then the Weapon Slot key
+-- (1..9, 0 = slot 10) is pressed, whatever that slot holds. Matcha cannot
+-- equip a tool without input: a client Parent write does not stick, there
+-- is no EquipTool, and keypress (even after setrobloxinput(true)) only
+-- reaches Roblox while it is the focused window, so the key is only sent
+-- then (unfocused it would type into the other window). Returns false and
+-- a hint when the hand is still empty; callers keep going either way.
 VK_DIGIT0 = 0x30
--- A slot that brought up no weapon (a fruit, or empty) is not pressed again
--- for EQUIP_WRONG_WAIT s: each press toggles that tool on and off.
-EQUIP_WRONG_WAIT = 5
-local equipState = { at = -1e9, wait = 0, why = nil }
-
--- Name of the tool in hand, fruits included (nil when none).
-local function heldToolName()
-    local name
-    pcall(function()
-        for _, child in ipairs(LocalPlayer.Character:GetChildren()) do
-            if child.ClassName == "Tool" then name = child.Name end
-        end
-    end)
-    return name
-end
+EQUIP_RETRY = 2 -- s between slot key presses while the hand stays empty
+local lastEquip = -1e9
 
 function AP.equipWeapon()
     if AP.holdsTool() then return true end
     local slot = math.floor(tonumber(S.apWeaponSlot) or 1) % 10
+    if not robloxFocused() then
+        return false, ("nothing held: equip slot %d (or focus Roblox once)"):format(slot)
+    end
     local now = clock()
-    if now - equipState.at < equipState.wait then return false, equipState.why end
-    if not robloxFocused() then return false, "focus Roblox to equip slot " .. slot end
-    pcall(keypress, VK_DIGIT0 + slot)
-    task.wait(0.1)
-    pcall(keyrelease, VK_DIGIT0 + slot)
-    task.wait(0.3)
+    if now - lastEquip >= EQUIP_RETRY then
+        lastEquip = now
+        pcall(keypress, VK_DIGIT0 + slot)
+        task.wait(0.1)
+        pcall(keyrelease, VK_DIGIT0 + slot)
+        task.wait(0.3)
+    end
     if AP.holdsTool() then return true end
-    local held = heldToolName()
-    equipState.at, equipState.wait = clock(), EQUIP_WRONG_WAIT
-    equipState.why = held and ("slot %d holds %s, not a weapon: set Weapon Slot"):format(slot, held)
-        or ("slot %d gave no weapon: set Weapon Slot"):format(slot)
-    return false, equipState.why
+    return false, ("nothing held: pressed slot %d"):format(slot)
 end
 
 -- Remote M1, the game's own path (Combat Action): Combat Event:FireServer(n)
@@ -2316,7 +2308,7 @@ function afq_activeQuest()
     if not AP.inQuest() then AFQ.tracked = nil return nil end
     if AFQ.tracked then return QUEST_BY_ID[AFQ.tracked] end
     local byId = QUEST_BY_ID[AP.questId() or -1]
-    if byId then return byId end
+    if byId then AFQ.tracked = byId.id return byId end
     -- Taken before AFQ started: match the quest text against the targets.
     local text = string.lower(AP.questText())
     for _, boss in ipairs(BOSS_TEXT) do
@@ -2330,6 +2322,8 @@ function afq_activeQuest()
             end
         end
     end
+    -- Track it: afq_fight only keeps going for the tracked quest.
+    if found then AFQ.tracked = found.id end
     return found
 end
 
@@ -2466,9 +2460,9 @@ task.spawn(function()
                     return
                 end
                 local armed, why = AP.equipWeapon()
-                if not armed then setStatus(why) task.wait(0.5) return end
                 local done, need = AP.questProgress()
-                setStatus(("%03d %s (%d/%s)"):format(quest.id, model.Name, done, need and tostring(need) or "?"))
+                setStatus(("%03d %s (%d/%s)%s"):format(quest.id, model.Name, done, need and tostring(need) or "?",
+                    armed and "" or (" - " .. why)))
                 afq_fight(quest, model, root)
             end)
             if not ok then

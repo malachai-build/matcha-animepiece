@@ -56,7 +56,7 @@ mainTab:AddToggle("ap_afq", {
 mainTab:AddInput("ap_weapon_slot", {
     Text = "Weapon Slot (1-0)", Default = tostring(S.apWeaponSlot), Numeric = true,
     Placeholder = "1", Column = 1,
-    Description = "Hotbar key of the weapon AFQ equips when you hold nothing (0 = slot 10). Needs Roblox focused.",
+    Description = "Hotbar key AFQ presses when your hand is empty (0 = slot 10); any tool, fruits included. The key only reaches Roblox while it is focused; once something is held AFQ runs unfocused.",
     Callback = function(v)
         local digit = tonumber(string.match(tostring(v or ""), "(%d)$"))
         if digit then S.apWeaponSlot = digit end

@@ -67,7 +67,7 @@ function afq_activeQuest()
     if not AP.inQuest() then AFQ.tracked = nil return nil end
     if AFQ.tracked then return QUEST_BY_ID[AFQ.tracked] end
     local byId = QUEST_BY_ID[AP.questId() or -1]
-    if byId then return byId end
+    if byId then AFQ.tracked = byId.id return byId end
     -- Taken before AFQ started: match the quest text against the targets.
     local text = string.lower(AP.questText())
     for _, boss in ipairs(BOSS_TEXT) do
@@ -81,6 +81,8 @@ function afq_activeQuest()
             end
         end
     end
+    -- Track it: afq_fight only keeps going for the tracked quest.
+    if found then AFQ.tracked = found.id end
     return found
 end
 
@@ -217,9 +219,9 @@ task.spawn(function()
                     return
                 end
                 local armed, why = AP.equipWeapon()
-                if not armed then setStatus(why) task.wait(0.5) return end
                 local done, need = AP.questProgress()
-                setStatus(("%03d %s (%d/%s)"):format(quest.id, model.Name, done, need and tostring(need) or "?"))
+                setStatus(("%03d %s (%d/%s)%s"):format(quest.id, model.Name, done, need and tostring(need) or "?",
+                    armed and "" or (" - " .. why)))
                 afq_fight(quest, model, root)
             end)
             if not ok then

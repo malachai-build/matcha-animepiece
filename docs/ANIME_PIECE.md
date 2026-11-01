@@ -57,7 +57,11 @@ only send `{"Quest", "003"}`. At Lv 21 the server refused 007 (Lv 45) and 026 (L
   So unlike Blox Fruits there is no target list to send, and AFQ must stay inside the hit box.
 - **A tool must be held.** With nothing equipped M1 does no damage at any distance. Moving the tool's
   `Parent` to the character from the client does not stick; pressing the hotbar key works, but only while
-  Roblox is the focused window (`keypress` goes to the focused window). AFQ presses the **Weapon Slot** key.
+  Roblox is the focused window (`keypress` goes to the focused window, also after `setrobloxinput(true)`;
+  there is no `EquipTool` in Matcha). The game's own equip (`Client.Services["Tool Service"]`) only fires
+  `Custom Tool Event:FireServer("Equip")` after the tool is already in the character. Any tool counts,
+  fruits included (they have M1). AFQ runs unfocused with whatever is held; only on an empty hand does it
+  press the **Weapon Slot** key, and only while Roblox is focused.
 - **Hover above, facing down** (live 2026-10-31, Higaro's bandit, Melee):
 
   | Root position | M1 lands | Damage taken |

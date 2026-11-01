@@ -2325,11 +2325,13 @@ function afq_activeQuest()
 end
 
 -- Quest area: the Part in IgnoreList["Quest Indicator"] named by the quest
--- number. Its position is the target spawn, not the giver.
+-- number. Its position is the target spawn, not the giver. Named "003" since
+-- 2026-10-31 (was "3"), so both spellings are tried.
 function afq_areaPosition(quest)
     local pos
     pcall(function()
-        local marker = Workspace.World.IgnoreList["Quest Indicator"]:FindFirstChild(tostring(quest.id))
+        local folder = Workspace.World.IgnoreList["Quest Indicator"]
+        local marker = folder:FindFirstChild(string.format("%03d", quest.id)) or folder:FindFirstChild(tostring(quest.id))
         if marker then pos = marker.Position end
     end)
     return pos

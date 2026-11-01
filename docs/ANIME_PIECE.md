@@ -112,6 +112,11 @@ What does not work around it:
   character, and setting it reads back `nil`.
 - Standing on an enemy: only its Torso has CanCollide, and the character slid straight off (no
   player-enemy collision).
+- A borrowed platform: writing `Size`, `CanCollide = true` and `Position` on a spare world part (the
+  "Buy Wrench" quest marker) reads back fine, but the character fell straight through it. Matcha's property
+  writes do not reach the physics engine, so the sag cannot be removed.
+
+Decision (2026-10-31): stay on the ground and accept deaths; the character respawns and AFQ continues.
 
 Rules AFQ follows now:
 - **Default Attack Height 0** (ground, in front, one write per swing). Above 0 is kept as an option, marked risky.
@@ -123,7 +128,7 @@ Rules AFQ follows now:
 
 - Enemies: `Workspace.World.Playability.Enemys`, models named `"<Name> [<level>+]"` (bosses have no tag).
 - Quest areas: `Workspace.World.IgnoreList["Quest Indicator"]`, one Part per quest, named by the quest
-  number without padding (`"1"`, `"13"`). Its position is the **target area**, not the giver.
+  number, zero-padded since 2026-10-31 (`"001"`, `"013"`; was `"1"`, `"13"`). Its position is the **target area**, not the giver.
 - Quest givers: `Workspace.World.IgnoreList.Npcs.Interactive.<Island>.<NPC>` (streamed per island).
 - World fruit spawn points: `Workspace.World.IgnoreList["Fruits Spawn"]` (19 `Point` parts).
 - Fruits in the game: Copy, Kilo, Warrior, Bomb, Flame, Emperor, Scarlet, Quake, Beast, Light, Infinity, Vessel.

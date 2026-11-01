@@ -230,6 +230,23 @@ function loadUEAdapter()
             return enhanceControl(id, button)
         end
 
+        -- Text box (UE GroupMethods:AddInput). Numeric = true only takes the
+        -- digit keys; UE appends each typed key to Value and calls Callback
+        -- with the whole string (Finished = true: only on Enter).
+        function tab:AddInput(id, info)
+            info = info or {}
+            local input = groupFor(self, info):AddInput(id, {
+                Text = info.Text or id,
+                Default = info.Default,
+                Numeric = info.Numeric == true,
+                Finished = info.Finished == true,
+                Placeholder = info.Placeholder,
+                Callback = info.Callback,
+                Tooltip = info.Description,
+            })
+            return enhanceControl(id, input)
+        end
+
         -- Read-only text line (UE GroupMethods:AddLabel(text, wraps)). UE draws
         -- the control's Text field every frame, so writing label.Text updates it.
         -- Not registered in Controls: labels have no value to save or reset.
@@ -328,6 +345,7 @@ function loadUEAdapter()
         function popup:AddSlider(...) return page:AddSlider(...) end
         function popup:AddDropdown(...) return page:AddDropdown(...) end
         function popup:AddButton(...) return page:AddButton(...) end
+        function popup:AddInput(...) return page:AddInput(...) end
         function popup:AddPriorityList(...) return page:AddPriorityList(...) end
         function popup:Show() raw:Show(); return self end
         function popup:Hide() raw:Hide(); return self end

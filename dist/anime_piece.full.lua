@@ -1502,6 +1502,23 @@ function loadUEAdapter()
             return enhanceControl(id, button)
         end
 
+        -- Text box (UE GroupMethods:AddInput). Numeric = true only takes the
+        -- digit keys; UE appends each typed key to Value and calls Callback
+        -- with the whole string (Finished = true: only on Enter).
+        function tab:AddInput(id, info)
+            info = info or {}
+            local input = groupFor(self, info):AddInput(id, {
+                Text = info.Text or id,
+                Default = info.Default,
+                Numeric = info.Numeric == true,
+                Finished = info.Finished == true,
+                Placeholder = info.Placeholder,
+                Callback = info.Callback,
+                Tooltip = info.Description,
+            })
+            return enhanceControl(id, input)
+        end
+
         -- Read-only text line (UE GroupMethods:AddLabel(text, wraps)). UE draws
         -- the control's Text field every frame, so writing label.Text updates it.
         -- Not registered in Controls: labels have no value to save or reset.
@@ -1600,6 +1617,7 @@ function loadUEAdapter()
         function popup:AddSlider(...) return page:AddSlider(...) end
         function popup:AddDropdown(...) return page:AddDropdown(...) end
         function popup:AddButton(...) return page:AddButton(...) end
+        function popup:AddInput(...) return page:AddInput(...) end
         function popup:AddPriorityList(...) return page:AddPriorityList(...) end
         function popup:Show() raw:Show(); return self end
         function popup:Hide() raw:Hide(); return self end
@@ -1870,6 +1888,10 @@ S.apGachaNow     = false -- set by the "Roll Now" button, cleared by the loop
 S.apFlySpeed     = 200   -- studs/s; tweenTo caps flights over 300 studs at 250
 S.apAttackRange  = 3     -- studs in front of the target while swinging
 S.apAttackRate   = 2.5   -- swings/s; the game's own M1 cooldown is 0.38 s
+S.apAttackHeight = 0     -- studs above the target, facing down; 0 = spot in front (anti-cheat safe, see docs)
+S.apWeaponSlot   = 1     -- hotbar key AFQ presses when nothing is held (1..9, 0 = slot 10)
+S.apHealBelow    = 35    -- % HP that sends AFQ up to heal (0 = never); a death unequips the weapon
+S.apHealUntil    = 90    -- % HP AFQ waits for before fighting again
 S.apPaused       = false -- the fruit farm owns the root (AFQ yields)
 
 Window = Library:CreateWindow({
@@ -1901,6 +1923,16 @@ mainTab:AddToggle("ap_afq", {
     Callback = function(v)
         S.apAfq = v
         notify(v and "Auto Farm Quest ON!" or "Auto Farm Quest OFF!", "laced.club", 2)
+    end
+})
+-- UE appends every typed digit to the box, so the last digit is the slot.
+mainTab:AddInput("ap_weapon_slot", {
+    Text = "Weapon Slot (1-0)", Default = tostring(S.apWeaponSlot), Numeric = true,
+    Placeholder = "1", Column = 1,
+    Description = "Hotbar key AFQ presses when your hand is empty (0 = slot 10); any tool, fruits included. The key only reaches Roblox while it is focused; once something is held AFQ runs unfocused.",
+    Callback = function(v)
+        local digit = tonumber(string.match(tostring(v or ""), "(%d)$"))
+        if digit then S.apWeaponSlot = digit end
     end
 })
 S.apAfqLabel = mainTab:AddLabel("ap_afq_status", { Text = "Auto Farm Quest: off", Column = 1 })
@@ -1942,6 +1974,21 @@ settingsTab:AddSlider("ap_fly_speed", {
 settingsTab:AddSlider("ap_attack_range", {
     Text = "Attack Distance", Min = 2, Max = 8, Step = 1, Default = S.apAttackRange, Integer = true, Column = 1,
     Callback = function(v) S.apAttackRange = math.max(2, tonumber(v) or 3) end
+})
+settingsTab:AddSlider("ap_attack_height", {
+    Text = "Attack Height", Min = 0, Max = 10, Step = 1, Default = S.apAttackHeight, Integer = true, Column = 1,
+    Description = "0 = stand in front (anti-cheat safe). Above 0 hovers facing down: measured at the kick threshold, risky (see docs)",
+    Callback = function(v) S.apAttackHeight = math.max(0, tonumber(v) or 0) end
+})
+settingsTab:AddSlider("ap_heal_below", {
+    Text = "Heal Below %", Min = 0, Max = 90, Step = 5, Default = S.apHealBelow, Integer = true, Column = 1,
+    Description = "AFQ leaves the fight 60 studs straight up below this HP (0 = never). A death unequips your weapon, and only a focused Roblox can equip it again",
+    Callback = function(v) S.apHealBelow = math.max(0, tonumber(v) or 35) end
+})
+settingsTab:AddSlider("ap_heal_until", {
+    Text = "Heal Until %", Min = 30, Max = 100, Step = 5, Default = S.apHealUntil, Integer = true, Column = 1,
+    Description = "HP AFQ waits for up there before fighting again (gives up after 90 s)",
+    Callback = function(v) S.apHealUntil = math.max(30, tonumber(v) or 90) end
 })
 settingsTab:AddSlider("ap_attack_rate", {
     Text = "Swings Per Second", Min = 1, Max = 2.6, Step = 0.1, Default = S.apAttackRate, Column = 1,
@@ -1998,18 +2045,51 @@ end
 -- Infos.Level is the real level; the player's Level attribute lags behind.
 function AP.level() return tonumber(statValue("Infos", "Level")) or 0 end
 function AP.money() return tonumber(statValue("Infos", "Money")) or 0 end
--- Current quest as a number (Quest.QuestId is "001", "2" or "None"), nil
--- when there is none or it is not a numbered quest.
+-- Quest.QuestId as a number when the game fills it in. Live on 2026-10-31
+-- it stayed "" through a whole accept of quest 003, so it is only a hint:
+-- InQuest and the quest text below are what tell the state.
 function AP.questId()
     local id = statValue("Quest", "QuestId")
     return tonumber(id)
 end
-function AP.questProgress() return tonumber(statValue("Quest", "Progress")) or 0 end
 
 function AP.boolAttribute(name)
     local value
     pcall(function() value = LocalPlayer:GetAttribute(name) end)
     return value == true
+end
+
+-- Health / MaxHealth of the live character, 0 when there is none.
+function AP.healthFraction()
+    local fraction = 0
+    pcall(function()
+        local hum = LocalPlayer.Character:FindFirstChild("Humanoid")
+        if hum and hum.MaxHealth > 0 then fraction = hum.Health / hum.MaxHealth end
+    end)
+    return fraction
+end
+
+-- InQuest (bool attribute, safe to read) flips true on an accept the server
+-- took and false on Quit; a rejected accept (level too low) leaves it false.
+function AP.inQuest() return AP.boolAttribute("InQuest") end
+
+-- Text of the quest panel: "Defeat Higaro's bandits (0/5)". The title keeps
+-- the last quest's name after a quit, so only trust it while InQuest.
+function AP.questText()
+    local text
+    pcall(function()
+        local desc = LocalPlayer.PlayerGui.Interfaces.Screen.Quest.Current:FindFirstChild("Description")
+        text = desc and desc.Text
+    end)
+    return type(text) == "string" and text or ""
+end
+
+-- Kills done and needed, from the "(n/m)" in the quest text (Quest.Progress
+-- stays 0 while the panel counts).
+function AP.questProgress()
+    local done, need = string.match(AP.questText(), "%((%d+)/(%d+)%)")
+    if done then return tonumber(done), tonumber(need) end
+    return tonumber(statValue("Quest", "Progress")) or 0, nil
 end
 
 function AP.root()
@@ -2076,39 +2156,147 @@ function AP.facing(fromPos, toPos)
     return CFrame.fromOrientation(0, math.atan2(-d.X, -d.Z), 0)
 end
 
--- True when the character holds a Tool (the server's M1 uses it).
+-- True when the character holds any Tool (the server's M1 uses it; fruits
+-- have M1 too, so they count).
 function AP.holdsTool()
     local char = LocalPlayer.Character
     if not char then return false end
     for _, child in ipairs(char:GetChildren()) do
-        if child.ClassName == "Tool" and not AP.FRUIT_SET[child.Name] then return true end
+        if child.ClassName == "Tool" then return true end
     end
     return false
 end
 
+-- Whatever the player holds is their weapon; only an empty hand is acted on
+-- (without a tool Combat Event does no damage). Then the Weapon Slot key
+-- (1..9, 0 = slot 10) is pressed, whatever that slot holds. Matcha cannot
+-- equip a tool without input: a client Parent write does not stick, there
+-- is no EquipTool, and keypress (even after setrobloxinput(true)) only
+-- reaches Roblox while it is the focused window, so the key is only sent
+-- then (unfocused it would type into the other window). Returns false and
+-- a hint when the hand is still empty; callers keep going either way.
+VK_DIGIT0 = 0x30
+EQUIP_RETRY = 2 -- s between slot key presses while the hand stays empty
+local lastEquip = -1e9
+
+function AP.equipWeapon()
+    if AP.holdsTool() then return true end
+    local slot = math.floor(tonumber(S.apWeaponSlot) or 1) % 10
+    if not robloxFocused() then
+        return false, ("nothing held: equip slot %d (or focus Roblox once)"):format(slot)
+    end
+    local now = clock()
+    if now - lastEquip >= EQUIP_RETRY then
+        lastEquip = now
+        pcall(keypress, VK_DIGIT0 + slot)
+        task.wait(0.1)
+        pcall(keyrelease, VK_DIGIT0 + slot)
+        task.wait(0.3)
+    end
+    if AP.holdsTool() then return true end
+    return false, ("nothing held: pressed slot %d"):format(slot)
+end
+
 -- Remote M1, the game's own path (Combat Action): Combat Event:FireServer(n)
--- with the combo step 1..4 and the equipped tool. The server hit box sits in
--- front of the root, so the root is placed AP.range studs in front of the
--- target, facing it, once per swing (a per-frame CFrame write is thousands of
--- memory writes in Matcha). Verified live: Bandit 20 HP -> 0 in 4 swings.
-local combo = { step = 0, at = -1e9 }
+-- with the combo step 1..4 and the equipped tool. The client sends only the
+-- combo step (no target list, extra args ignored): the server hit box comes
+-- from the root's position and facing. So the root goes S.apAttackHeight
+-- studs straight above the target facing down, where M1 still lands (live:
+-- 7 studs hit, 10 and 15 did not) and the enemies' melee does not (standing
+-- in front lost 23 HP in 2.4 s, overhead lost none). Height 0 keeps the old
+-- spot AP.range studs in front, facing it.
+--
+-- One write per swing, never more, and the hover is NOT held between swings
+-- (the root falls): the game's client check (Client Anti Exploiter["Anti
+-- Enemy Weld"], docs) samples every 0.05 s and, with an enemy within 10
+-- studs, counts a sample when the root moved > 0.1, the distance changed
+-- <= 0.75 and the offset changed > 0.1; 5+ in 0.5 s while hitting is a
+-- strike, 5 strikes a kick. Re-placing after every 1.5 stud sag counted ~8
+-- per window and got us kicked in ~2.5 s. A free fall only counts its first
+-- ~2 samples (after that it drops > 0.75 per sample), so one write per
+-- swing stays under 5. A per-frame hold is not possible: one placeRoot
+-- costs ~38 ms in Matcha.
+--
+-- Armed, even the ground spot trips it: hits knock both bodies around
+-- every sample (mirror: 3-5 per window in 2.5 s; InHit and Stunned are set
+-- by the server during real hits). But a sample with NO enemy within 10
+-- studs resets the window, and a strike is only judged once a window fills
+-- 0.5 s. So HIT_DWELL s after each swing the root steps RETREAT_DIST studs
+-- out from the target along the ground (out of the 10 stud radius, no fall)
+-- and comes back for the next swing: ~4 samples in range per swing, the
+-- window never fills, and half of the time is out of melee reach. Two
+-- writes per swing. (Popping 20 studs up instead lost writes: the server
+-- put the root back, ~100 studs/s of teleports.)
+local FACE_DOWN = CFrame.fromOrientation(-math.pi / 2, 0, 0)
+HIT_DWELL = 0.2     -- s next to the target after a swing (the server's hit needs it)
+RETREAT_DIST = 12   -- studs from the target between swings (radius 10 + margin)
+RETREAT_UP = 20     -- studs above the target where AFQ arrives (outside the radius)
+local combo = { step = 0, at = -1e9, retreated = true }
+
+-- Of 8 ground spots RETREAT_DIST studs around the target, the one farthest
+-- from every live enemy: mobs stand in groups, and a spot 12 studs from the
+-- target can be within 10 of its neighbour.
+local RETREAT_DIRS = {}
+for i = 0, 7 do
+    local angle = i * math.pi / 4
+    RETREAT_DIRS[#RETREAT_DIRS + 1] = Vector3.new(math.cos(angle), 0, math.sin(angle))
+end
+function AP.retreatSpot(tpos)
+    local roots = {}
+    pcall(function()
+        for _, model in ipairs(AP.enemyFolder():GetChildren()) do
+            local root = AP.enemyRoot(model)
+            if root then
+                local pos = root.Position
+                if (pos - tpos).Magnitude < RETREAT_DIST + 12 then roots[#roots + 1] = pos end
+            end
+        end
+    end)
+    local best, bestClear = tpos + RETREAT_DIRS[1] * RETREAT_DIST, -1
+    for _, dir in ipairs(RETREAT_DIRS) do
+        local spot = tpos + dir * RETREAT_DIST
+        local clear = math.huge
+        for _, pos in ipairs(roots) do
+            local d = (pos - spot).Magnitude
+            if d < clear then clear = d end
+        end
+        if clear > bestClear then best, bestClear = spot, clear end
+    end
+    return best
+end
 function AP.swing(targetRoot)
     local me = AP.root()
     if not me or not targetRoot then return false end
     local now = clock()
     local interval = 1 / math.max(1, tonumber(S.apAttackRate) or 2.5)
-    if now - combo.at < interval then return true end
+    local height = tonumber(S.apAttackHeight) or 0
+    if now - combo.at < interval then
+        if not combo.retreated and now - combo.at >= HIT_DWELL and not rootTweenOwned() then
+            combo.retreated = true
+            local okPos, tpos = pcall(function() return targetRoot.Position end)
+            if okPos and tpos then
+                local spot = AP.retreatSpot(tpos)
+                placeRoot(me, spot.X, tpos.Y, spot.Z, AP.facing(spot, tpos))
+            end
+        end
+        return true
+    end
     local okPos, tpos, look = pcall(function() return targetRoot.Position, targetRoot.CFrame.LookVector end)
     if not okPos or not tpos then return false end
-    local range = tonumber(S.apAttackRange) or 3
-    local spot = tpos + Vector3.new(look.X, 0, look.Z) * range
     if not rootTweenOwned() then
-        placeRoot(me, spot.X, tpos.Y, spot.Z, AP.facing(spot, tpos))
+        if height > 0 then
+            placeRoot(me, tpos.X, tpos.Y + height, tpos.Z, FACE_DOWN)
+        else
+            local range = tonumber(S.apAttackRange) or 3
+            local spot = tpos + Vector3.new(look.X, 0, look.Z) * range
+            placeRoot(me, spot.X, tpos.Y, spot.Z, AP.facing(spot, tpos))
+        end
     end
     -- The game resets the combo after a 1 s gap or the 4th hit.
     if now - combo.at > 1 or combo.step >= 4 then combo.step = 0 end
     combo.step = combo.step + 1
     combo.at = now
+    combo.retreated = false
     markFight()
     return safeRemote("Combat Event", AP.remote("Combat Event"), "FireServer", combo.step)
 end
@@ -2161,26 +2349,71 @@ for _, quest in ipairs(AP_QUESTS) do
 end
 
 AFQ_AREA_RADIUS = 700   -- studs around the quest's area marker that count as its spawn
-AFQ_ACCEPT_WAIT = 3     -- s for Quest.QuestId to change after an accept
-AFQ_ACCEPT_RETRY = 6    -- s between accept attempts for the same quest
+AFQ_ACCEPT_WAIT = 3     -- s for InQuest to flip after an accept or a quit
+AFQ_LOCK_TIME = 120     -- s a refused quest is skipped (a level-up clears it sooner)
 AFQ_TARGET_TIMEOUT = 25 -- s on one enemy before trying another (stuck / unreachable)
 AFQ_AREA_HEIGHT = 25    -- studs above the marker while waiting for respawns
+AFQ_HEAL_HEIGHT = 60    -- studs straight up while healing (far out of the anti-cheat's 10 studs and melee)
+AFQ_HEAL_HOLD = 0.35    -- s between re-places while healing (the root falls ~12 studs in between)
+AFQ_HEAL_TIMEOUT = 90   -- s of healing before fighting again anyway (no regen, or regen stalls)
 
--- Highest quest the current level allows.
+-- Boss quests whose text contains a mob target ("Defeat Robot King" holds
+-- "Robot"): never read them as that mob's quest.
+local BOSS_TEXT = { "robot king", "robot 15", "robot 16" }
+
+-- tracked: id of the quest AFQ accepted, kept while InQuest stays true.
+-- locked[id] = clock() when the server refused it (the level gate is server
+-- side: live, Lv 21 was refused 007 and 026 and took 003).
+AFQ = { tracked = nil, locked = {}, level = nil }
+
+-- Highest quest the level allows that the server has not just refused. The
+-- table levels are the enemies' tags; a refusal drops to the tier below
+-- until the next level-up, so a wrong tag costs one accept, not the farm.
 function afq_bestQuest(level)
+    local now = clock()
     local best
     for _, quest in ipairs(AP_QUESTS) do
-        if quest.level <= level then best = quest end
+        local lockedAt = AFQ.locked[quest.id]
+        if quest.level <= level and not (lockedAt and now - lockedAt < AFQ_LOCK_TIME) then
+            best = quest
+        end
     end
     return best
 end
 
+-- The active quest: nil when none, false when it is not one of AP_QUESTS
+-- (a boss, collect or hand-picked quest AFQ cannot tell apart).
+function afq_activeQuest()
+    if not AP.inQuest() then AFQ.tracked = nil return nil end
+    if AFQ.tracked then return QUEST_BY_ID[AFQ.tracked] end
+    local byId = QUEST_BY_ID[AP.questId() or -1]
+    if byId then AFQ.tracked = byId.id return byId end
+    -- Taken before AFQ started: match the quest text against the targets.
+    local text = string.lower(AP.questText())
+    for _, boss in ipairs(BOSS_TEXT) do
+        if string.find(text, boss, 1, true) then return false end
+    end
+    local found, foundLen = false, 0
+    for _, quest in ipairs(AP_QUESTS) do
+        for _, name in ipairs(quest.targets) do
+            if #name > foundLen and string.find(text, string.lower(name), 1, true) then
+                found, foundLen = quest, #name
+            end
+        end
+    end
+    -- Track it: afq_fight only keeps going for the tracked quest.
+    if found then AFQ.tracked = found.id end
+    return found
+end
+
 -- Quest area: the Part in IgnoreList["Quest Indicator"] named by the quest
--- number. Its position is the target spawn, not the giver.
+-- number. Its position is the target spawn, not the giver. Named "003" since
+-- 2026-10-31 (was "3"), so both spellings are tried.
 function afq_areaPosition(quest)
     local pos
     pcall(function()
-        local marker = Workspace.World.IgnoreList["Quest Indicator"]:FindFirstChild(tostring(quest.id))
+        local folder = Workspace.World.IgnoreList["Quest Indicator"]
+        local marker = folder:FindFirstChild(string.format("%03d", quest.id)) or folder:FindFirstChild(tostring(quest.id))
         if marker then pos = marker.Position end
     end)
     return pos
@@ -2191,47 +2424,89 @@ local function setStatus(text) AP.setLabel(S.apAfqLabel, "Auto Farm Quest: " .. 
 -- The quest Yes button sends Dialogue Event {"Quest", "001"}. The server
 -- accepts it from anywhere (verified 282 studs from the giver), so there is
 -- no flight to the NPC and no dialogue click.
-local lastAccept = { id = nil, at = -1e9 }
+-- Returns "accepted", "refused" (InQuest stayed false: level too low) or
+-- "unsent" (the remote failed; not the quest's fault, so no lock).
 function afq_accept(quest)
-    local now = clock()
-    if lastAccept.id == quest.id and now - lastAccept.at < AFQ_ACCEPT_RETRY then return false end
-    lastAccept.id, lastAccept.at = quest.id, now
     local id = string.format("%03d", quest.id)
-    safeRemote("Dialogue Event", AP.remote("Dialogue Event"), "FireServer", { "Quest", id })
+    if not safeRemote("Dialogue Event", AP.remote("Dialogue Event"), "FireServer", { "Quest", id }) then
+        return "unsent"
+    end
     local deadline = clock() + AFQ_ACCEPT_WAIT
     while alive() and clock() < deadline do
-        if AP.questId() == quest.id then return true end
+        if AP.inQuest() then AFQ.tracked = quest.id return "accepted" end
         task.wait(0.2)
     end
-    return AP.questId() == quest.id
+    if AP.inQuest() then AFQ.tracked = quest.id return "accepted" end
+    return "refused"
 end
 
--- Another quest is active (an older tier, or one the player took by hand):
--- quit it so the best one can be taken. The game keeps one quest at a time.
+-- Another quest is active (an older tier after a level-up, or one the
+-- player took by hand): quit it so the best one can be taken. The game
+-- keeps one quest at a time.
 function afq_quit()
     safeRemote("Quest Event", AP.remote("Quest Event"), "FireServer", "Quit")
     local deadline = clock() + AFQ_ACCEPT_WAIT
     while alive() and clock() < deadline do
-        if AP.questId() == nil then return true end
+        if not AP.inQuest() then AFQ.tracked = nil return true end
         task.wait(0.2)
     end
-    return AP.questId() == nil
+    return not AP.inQuest()
 end
 
--- Fight one enemy until it dies, the quest ends or changes, AFQ is switched
--- off or the fruit farm takes over.
+-- Health guard: a death puts the weapon back in the backpack, and with
+-- Roblox unfocused AFQ cannot equip it again (docs). So below Heal Below %
+-- AFQ leaves the fight straight up and waits for Heal Until %.
+AFQ_HEAL_COOLDOWN = 30  -- s of fighting after a heal that timed out (no climbing 60 studs per try)
+local healBlockedUntil = -1e9
+function afq_needsHeal()
+    local below = tonumber(S.apHealBelow) or 0
+    return below > 0 and clock() >= healBlockedUntil and AP.root() ~= nil and AP.healthFraction() * 100 < below
+end
+
+-- Hold AFQ_HEAL_HEIGHT studs above where the fight was until the health is
+-- back (or AFQ_HEAL_TIMEOUT). One write per AFQ_HEAL_HOLD: no enemy is within
+-- 10 studs up there, so the anti-cheat check does not run.
+function afq_heal()
+    local me = AP.root()
+    if not me then return end
+    local okPos, from = pcall(function() return me.Position end)
+    if not okPos or not from then return end
+    local spot = from + Vector3.new(0, AFQ_HEAL_HEIGHT, 0)
+    local function keep() return alive() and S.apAfq and not S.apPaused and AP.root() ~= nil end
+    AP.flyTo(spot, keep)
+    local started = clock()
+    local untilPct = math.max(tonumber(S.apHealBelow) or 0, tonumber(S.apHealUntil) or 90)
+    while keep() and clock() - started < AFQ_HEAL_TIMEOUT do
+        local pct = AP.healthFraction() * 100
+        if pct >= untilPct then return end
+        setStatus(("healing %d%% -> %d%%"):format(pct, untilPct))
+        local root = AP.root()
+        if root and not rootTweenOwned() then placeRoot(root, spot.X, spot.Y, spot.Z, lockedRotation(root)) end
+        task.wait(AFQ_HEAL_HOLD)
+    end
+    if clock() - started >= AFQ_HEAL_TIMEOUT then healBlockedUntil = clock() + AFQ_HEAL_COOLDOWN end
+end
+
+-- Fight one enemy until it dies, the quest ends, the level changes (a new
+-- tier may be open), the health guard trips, AFQ is switched off or the
+-- fruit farm takes over.
 function afq_fight(quest, model, targetRoot)
     local started = clock()
+    local level = AFQ.level
     local function keep()
-        return alive() and S.apAfq and not S.apPaused and AP.questId() == quest.id
+        return alive() and S.apAfq and not S.apPaused and AFQ.tracked == quest.id
+            and AP.inQuest() and AP.level() == level and not afq_needsHeal()
     end
-    -- Fly in first; the swing then pins the root next to the target.
+    -- Fly in to the retreat spot RETREAT_UP studs above the target, outside
+    -- the anti-cheat's 10 stud radius (see AP.swing); each swing then drops
+    -- in next to the target and pops back up.
     local okPos, tpos = pcall(function() return targetRoot.Position end)
     if not okPos or not tpos then return end
     local me = AP.root()
-    if me and (me.Position - tpos).Magnitude > 12 then
-        AP.flyTo(tpos + Vector3.new(0, 3, 0), keep)
+    if me and (me.Position - tpos).Magnitude > RETREAT_UP + 2 then
+        AP.flyTo(tpos + Vector3.new(0, RETREAT_UP, 0), keep)
     end
+    -- AP.swing writes the root once per swing only (anti-cheat, see there).
     while keep() and clock() - started < AFQ_TARGET_TIMEOUT do
         local root = AP.enemyRoot(model)
         if not root then return end
@@ -2257,20 +2532,35 @@ task.spawn(function()
         else
             wasOn = true
             local ok, err = pcall(function()
+                if not AP.stats() then setStatus("waiting for player data") task.wait(1) return end
                 local level = AP.level()
+                if AFQ.level ~= level then
+                    -- Level changed: tiers the server refused may be open now.
+                    if AFQ.level then setStatus(("level %d -> %d, checking quests"):format(AFQ.level, level)) end
+                    AFQ.level = level
+                    AFQ.locked = {}
+                end
                 local quest = afq_bestQuest(level)
-                if not quest then setStatus("no kill quest for level " .. level) task.wait(2) return end
-                local current = AP.questId()
-                if current ~= quest.id then
+                if not quest then setStatus("no kill quest the server takes at Lv " .. level) task.wait(2) return end
+                local current = afq_activeQuest()
+                if current ~= quest then
                     if current ~= nil then
-                        setStatus(("quitting quest %03d for %03d"):format(current, quest.id))
+                        setStatus(current and ("quitting quest %03d for %03d"):format(current.id, quest.id)
+                            or ("quitting other quest for %03d"):format(quest.id))
                         afq_quit()
                         return
                     end
                     setStatus(("accepting quest %03d (Lv %d)"):format(quest.id, quest.level))
-                    if not afq_accept(quest) then task.wait(1) end
+                    local result = afq_accept(quest)
+                    if result == "refused" then
+                        AFQ.locked[quest.id] = clock()
+                        warnThrottled("afq-refused", ("[laced.club] Auto Farm Quest: quest %03d refused at Lv %d, using a lower tier"):format(quest.id, level), 30)
+                    elseif result == "unsent" then
+                        task.wait(1)
+                    end
                     return
                 end
+                if afq_needsHeal() then afq_heal() return end
                 local area = afq_areaPosition(quest)
                 local model, root = AP.nearestEnemy(quest.targetSet, area, AFQ_AREA_RADIUS)
                 if not model then
@@ -2288,7 +2578,10 @@ task.spawn(function()
                     end
                     return
                 end
-                setStatus(("%s (%d done)"):format(model.Name, AP.questProgress()))
+                local armed, why = AP.equipWeapon()
+                local done, need = AP.questProgress()
+                setStatus(("%03d %s (%d/%s)%s"):format(quest.id, model.Name, done, need and tostring(need) or "?",
+                    armed and "" or (" - " .. why)))
                 afq_fight(quest, model, root)
             end)
             if not ok then

@@ -32,26 +32,71 @@ for _, quest in ipairs(AP_QUESTS) do
 end
 
 AFQ_AREA_RADIUS = 700   -- studs around the quest's area marker that count as its spawn
-AFQ_ACCEPT_WAIT = 3     -- s for Quest.QuestId to change after an accept
-AFQ_ACCEPT_RETRY = 6    -- s between accept attempts for the same quest
+AFQ_ACCEPT_WAIT = 3     -- s for InQuest to flip after an accept or a quit
+AFQ_LOCK_TIME = 120     -- s a refused quest is skipped (a level-up clears it sooner)
 AFQ_TARGET_TIMEOUT = 25 -- s on one enemy before trying another (stuck / unreachable)
 AFQ_AREA_HEIGHT = 25    -- studs above the marker while waiting for respawns
+AFQ_HEAL_HEIGHT = 60    -- studs straight up while healing (far out of the anti-cheat's 10 studs and melee)
+AFQ_HEAL_HOLD = 0.35    -- s between re-places while healing (the root falls ~12 studs in between)
+AFQ_HEAL_TIMEOUT = 90   -- s of healing before fighting again anyway (no regen, or regen stalls)
 
--- Highest quest the current level allows.
+-- Boss quests whose text contains a mob target ("Defeat Robot King" holds
+-- "Robot"): never read them as that mob's quest.
+local BOSS_TEXT = { "robot king", "robot 15", "robot 16" }
+
+-- tracked: id of the quest AFQ accepted, kept while InQuest stays true.
+-- locked[id] = clock() when the server refused it (the level gate is server
+-- side: live, Lv 21 was refused 007 and 026 and took 003).
+AFQ = { tracked = nil, locked = {}, level = nil }
+
+-- Highest quest the level allows that the server has not just refused. The
+-- table levels are the enemies' tags; a refusal drops to the tier below
+-- until the next level-up, so a wrong tag costs one accept, not the farm.
 function afq_bestQuest(level)
+    local now = clock()
     local best
     for _, quest in ipairs(AP_QUESTS) do
-        if quest.level <= level then best = quest end
+        local lockedAt = AFQ.locked[quest.id]
+        if quest.level <= level and not (lockedAt and now - lockedAt < AFQ_LOCK_TIME) then
+            best = quest
+        end
     end
     return best
 end
 
+-- The active quest: nil when none, false when it is not one of AP_QUESTS
+-- (a boss, collect or hand-picked quest AFQ cannot tell apart).
+function afq_activeQuest()
+    if not AP.inQuest() then AFQ.tracked = nil return nil end
+    if AFQ.tracked then return QUEST_BY_ID[AFQ.tracked] end
+    local byId = QUEST_BY_ID[AP.questId() or -1]
+    if byId then AFQ.tracked = byId.id return byId end
+    -- Taken before AFQ started: match the quest text against the targets.
+    local text = string.lower(AP.questText())
+    for _, boss in ipairs(BOSS_TEXT) do
+        if string.find(text, boss, 1, true) then return false end
+    end
+    local found, foundLen = false, 0
+    for _, quest in ipairs(AP_QUESTS) do
+        for _, name in ipairs(quest.targets) do
+            if #name > foundLen and string.find(text, string.lower(name), 1, true) then
+                found, foundLen = quest, #name
+            end
+        end
+    end
+    -- Track it: afq_fight only keeps going for the tracked quest.
+    if found then AFQ.tracked = found.id end
+    return found
+end
+
 -- Quest area: the Part in IgnoreList["Quest Indicator"] named by the quest
--- number. Its position is the target spawn, not the giver.
+-- number. Its position is the target spawn, not the giver. Named "003" since
+-- 2026-10-31 (was "3"), so both spellings are tried.
 function afq_areaPosition(quest)
     local pos
     pcall(function()
-        local marker = Workspace.World.IgnoreList["Quest Indicator"]:FindFirstChild(tostring(quest.id))
+        local folder = Workspace.World.IgnoreList["Quest Indicator"]
+        local marker = folder:FindFirstChild(string.format("%03d", quest.id)) or folder:FindFirstChild(tostring(quest.id))
         if marker then pos = marker.Position end
     end)
     return pos
@@ -62,47 +107,89 @@ local function setStatus(text) AP.setLabel(S.apAfqLabel, "Auto Farm Quest: " .. 
 -- The quest Yes button sends Dialogue Event {"Quest", "001"}. The server
 -- accepts it from anywhere (verified 282 studs from the giver), so there is
 -- no flight to the NPC and no dialogue click.
-local lastAccept = { id = nil, at = -1e9 }
+-- Returns "accepted", "refused" (InQuest stayed false: level too low) or
+-- "unsent" (the remote failed; not the quest's fault, so no lock).
 function afq_accept(quest)
-    local now = clock()
-    if lastAccept.id == quest.id and now - lastAccept.at < AFQ_ACCEPT_RETRY then return false end
-    lastAccept.id, lastAccept.at = quest.id, now
     local id = string.format("%03d", quest.id)
-    safeRemote("Dialogue Event", AP.remote("Dialogue Event"), "FireServer", { "Quest", id })
+    if not safeRemote("Dialogue Event", AP.remote("Dialogue Event"), "FireServer", { "Quest", id }) then
+        return "unsent"
+    end
     local deadline = clock() + AFQ_ACCEPT_WAIT
     while alive() and clock() < deadline do
-        if AP.questId() == quest.id then return true end
+        if AP.inQuest() then AFQ.tracked = quest.id return "accepted" end
         task.wait(0.2)
     end
-    return AP.questId() == quest.id
+    if AP.inQuest() then AFQ.tracked = quest.id return "accepted" end
+    return "refused"
 end
 
--- Another quest is active (an older tier, or one the player took by hand):
--- quit it so the best one can be taken. The game keeps one quest at a time.
+-- Another quest is active (an older tier after a level-up, or one the
+-- player took by hand): quit it so the best one can be taken. The game
+-- keeps one quest at a time.
 function afq_quit()
     safeRemote("Quest Event", AP.remote("Quest Event"), "FireServer", "Quit")
     local deadline = clock() + AFQ_ACCEPT_WAIT
     while alive() and clock() < deadline do
-        if AP.questId() == nil then return true end
+        if not AP.inQuest() then AFQ.tracked = nil return true end
         task.wait(0.2)
     end
-    return AP.questId() == nil
+    return not AP.inQuest()
 end
 
--- Fight one enemy until it dies, the quest ends or changes, AFQ is switched
--- off or the fruit farm takes over.
+-- Health guard: a death puts the weapon back in the backpack, and with
+-- Roblox unfocused AFQ cannot equip it again (docs). So below Heal Below %
+-- AFQ leaves the fight straight up and waits for Heal Until %.
+AFQ_HEAL_COOLDOWN = 30  -- s of fighting after a heal that timed out (no climbing 60 studs per try)
+local healBlockedUntil = -1e9
+function afq_needsHeal()
+    local below = tonumber(S.apHealBelow) or 0
+    return below > 0 and clock() >= healBlockedUntil and AP.root() ~= nil and AP.healthFraction() * 100 < below
+end
+
+-- Hold AFQ_HEAL_HEIGHT studs above where the fight was until the health is
+-- back (or AFQ_HEAL_TIMEOUT). One write per AFQ_HEAL_HOLD: no enemy is within
+-- 10 studs up there, so the anti-cheat check does not run.
+function afq_heal()
+    local me = AP.root()
+    if not me then return end
+    local okPos, from = pcall(function() return me.Position end)
+    if not okPos or not from then return end
+    local spot = from + Vector3.new(0, AFQ_HEAL_HEIGHT, 0)
+    local function keep() return alive() and S.apAfq and not S.apPaused and AP.root() ~= nil end
+    AP.flyTo(spot, keep)
+    local started = clock()
+    local untilPct = math.max(tonumber(S.apHealBelow) or 0, tonumber(S.apHealUntil) or 90)
+    while keep() and clock() - started < AFQ_HEAL_TIMEOUT do
+        local pct = AP.healthFraction() * 100
+        if pct >= untilPct then return end
+        setStatus(("healing %d%% -> %d%%"):format(pct, untilPct))
+        local root = AP.root()
+        if root and not rootTweenOwned() then placeRoot(root, spot.X, spot.Y, spot.Z, lockedRotation(root)) end
+        task.wait(AFQ_HEAL_HOLD)
+    end
+    if clock() - started >= AFQ_HEAL_TIMEOUT then healBlockedUntil = clock() + AFQ_HEAL_COOLDOWN end
+end
+
+-- Fight one enemy until it dies, the quest ends, the level changes (a new
+-- tier may be open), the health guard trips, AFQ is switched off or the
+-- fruit farm takes over.
 function afq_fight(quest, model, targetRoot)
     local started = clock()
+    local level = AFQ.level
     local function keep()
-        return alive() and S.apAfq and not S.apPaused and AP.questId() == quest.id
+        return alive() and S.apAfq and not S.apPaused and AFQ.tracked == quest.id
+            and AP.inQuest() and AP.level() == level and not afq_needsHeal()
     end
-    -- Fly in first; the swing then pins the root next to the target.
+    -- Fly in to the retreat spot RETREAT_UP studs above the target, outside
+    -- the anti-cheat's 10 stud radius (see AP.swing); each swing then drops
+    -- in next to the target and pops back up.
     local okPos, tpos = pcall(function() return targetRoot.Position end)
     if not okPos or not tpos then return end
     local me = AP.root()
-    if me and (me.Position - tpos).Magnitude > 12 then
-        AP.flyTo(tpos + Vector3.new(0, 3, 0), keep)
+    if me and (me.Position - tpos).Magnitude > RETREAT_UP + 2 then
+        AP.flyTo(tpos + Vector3.new(0, RETREAT_UP, 0), keep)
     end
+    -- AP.swing writes the root once per swing only (anti-cheat, see there).
     while keep() and clock() - started < AFQ_TARGET_TIMEOUT do
         local root = AP.enemyRoot(model)
         if not root then return end
@@ -128,20 +215,35 @@ task.spawn(function()
         else
             wasOn = true
             local ok, err = pcall(function()
+                if not AP.stats() then setStatus("waiting for player data") task.wait(1) return end
                 local level = AP.level()
+                if AFQ.level ~= level then
+                    -- Level changed: tiers the server refused may be open now.
+                    if AFQ.level then setStatus(("level %d -> %d, checking quests"):format(AFQ.level, level)) end
+                    AFQ.level = level
+                    AFQ.locked = {}
+                end
                 local quest = afq_bestQuest(level)
-                if not quest then setStatus("no kill quest for level " .. level) task.wait(2) return end
-                local current = AP.questId()
-                if current ~= quest.id then
+                if not quest then setStatus("no kill quest the server takes at Lv " .. level) task.wait(2) return end
+                local current = afq_activeQuest()
+                if current ~= quest then
                     if current ~= nil then
-                        setStatus(("quitting quest %03d for %03d"):format(current, quest.id))
+                        setStatus(current and ("quitting quest %03d for %03d"):format(current.id, quest.id)
+                            or ("quitting other quest for %03d"):format(quest.id))
                         afq_quit()
                         return
                     end
                     setStatus(("accepting quest %03d (Lv %d)"):format(quest.id, quest.level))
-                    if not afq_accept(quest) then task.wait(1) end
+                    local result = afq_accept(quest)
+                    if result == "refused" then
+                        AFQ.locked[quest.id] = clock()
+                        warnThrottled("afq-refused", ("[laced.club] Auto Farm Quest: quest %03d refused at Lv %d, using a lower tier"):format(quest.id, level), 30)
+                    elseif result == "unsent" then
+                        task.wait(1)
+                    end
                     return
                 end
+                if afq_needsHeal() then afq_heal() return end
                 local area = afq_areaPosition(quest)
                 local model, root = AP.nearestEnemy(quest.targetSet, area, AFQ_AREA_RADIUS)
                 if not model then
@@ -159,7 +261,10 @@ task.spawn(function()
                     end
                     return
                 end
-                setStatus(("%s (%d done)"):format(model.Name, AP.questProgress()))
+                local armed, why = AP.equipWeapon()
+                local done, need = AP.questProgress()
+                setStatus(("%03d %s (%d/%s)%s"):format(quest.id, model.Name, done, need and tostring(need) or "?",
+                    armed and "" or (" - " .. why)))
                 afq_fight(quest, model, root)
             end)
             if not ok then

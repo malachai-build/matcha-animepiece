@@ -17,6 +17,8 @@ S.apGachaNow     = false -- set by the "Roll Now" button, cleared by the loop
 S.apFlySpeed     = 200   -- studs/s; tweenTo caps flights over 300 studs at 250
 S.apAttackRange  = 3     -- studs in front of the target while swinging
 S.apAttackRate   = 2.5   -- swings/s; the game's own M1 cooldown is 0.38 s
+S.apAttackHeight = 6     -- studs above the target, facing down (0 = old spot in front)
+S.apWeaponSlot   = 1     -- hotbar key AFQ presses when nothing is held (1..9, 0 = slot 10)
 S.apPaused       = false -- the fruit farm owns the root (AFQ yields)
 
 Window = Library:CreateWindow({
@@ -48,6 +50,16 @@ mainTab:AddToggle("ap_afq", {
     Callback = function(v)
         S.apAfq = v
         notify(v and "Auto Farm Quest ON!" or "Auto Farm Quest OFF!", "laced.club", 2)
+    end
+})
+-- UE appends every typed digit to the box, so the last digit is the slot.
+mainTab:AddInput("ap_weapon_slot", {
+    Text = "Weapon Slot (1-0)", Default = tostring(S.apWeaponSlot), Numeric = true,
+    Placeholder = "1", Column = 1,
+    Description = "Hotbar key of the weapon AFQ equips when you hold nothing (0 = slot 10). Needs Roblox focused.",
+    Callback = function(v)
+        local digit = tonumber(string.match(tostring(v or ""), "(%d)$"))
+        if digit then S.apWeaponSlot = digit end
     end
 })
 S.apAfqLabel = mainTab:AddLabel("ap_afq_status", { Text = "Auto Farm Quest: off", Column = 1 })
@@ -89,6 +101,11 @@ settingsTab:AddSlider("ap_fly_speed", {
 settingsTab:AddSlider("ap_attack_range", {
     Text = "Attack Distance", Min = 2, Max = 8, Step = 1, Default = S.apAttackRange, Integer = true, Column = 1,
     Callback = function(v) S.apAttackRange = math.max(2, tonumber(v) or 3) end
+})
+settingsTab:AddSlider("ap_attack_height", {
+    Text = "Attack Height", Min = 0, Max = 10, Step = 1, Default = S.apAttackHeight, Integer = true, Column = 1,
+    Description = "Studs above the enemy while swinging, facing down (hit live at 7, out of reach of melee). 0 = stand in front",
+    Callback = function(v) S.apAttackHeight = math.max(0, tonumber(v) or 6) end
 })
 settingsTab:AddSlider("ap_attack_rate", {
     Text = "Swings Per Second", Min = 1, Max = 2.6, Step = 0.1, Default = S.apAttackRate, Column = 1,

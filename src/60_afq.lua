@@ -138,12 +138,13 @@ function afq_fight(quest, model, targetRoot)
         return alive() and S.apAfq and not S.apPaused and AFQ.tracked == quest.id
             and AP.inQuest() and AP.level() == level
     end
-    -- Fly in first; the swing then pins the root next to the target.
+    -- Fly in first, at the hover height; the swing then pins the root above
+    -- (or next to) the target.
     local okPos, tpos = pcall(function() return targetRoot.Position end)
     if not okPos or not tpos then return end
     local me = AP.root()
     if me and (me.Position - tpos).Magnitude > 12 then
-        AP.flyTo(tpos + Vector3.new(0, 3, 0), keep)
+        AP.flyTo(tpos + Vector3.new(0, math.max(3, tonumber(S.apAttackHeight) or 0), 0), keep)
     end
     while keep() and clock() - started < AFQ_TARGET_TIMEOUT do
         local root = AP.enemyRoot(model)
@@ -215,6 +216,8 @@ task.spawn(function()
                     end
                     return
                 end
+                local armed, why = AP.equipWeapon()
+                if not armed then setStatus(why) task.wait(0.5) return end
                 local done, need = AP.questProgress()
                 setStatus(("%03d %s (%d/%s)"):format(quest.id, model.Name, done, need and tostring(need) or "?"))
                 afq_fight(quest, model, root)

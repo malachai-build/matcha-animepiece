@@ -25,11 +25,11 @@ Remotes (`FireServer`) need Matcha Pro / Hybrid mode.
 
 | Control | What it does | Live tested |
 |---|---|---|
-| Auto Farm Quest | Takes the highest regular kill quest for your level (001 Bandit Lv 0 ... 026 Special Student Lv 190), quits any other active quest, accepts remotely, flies to the quest area and attacks with remote M1. Quests complete at N/N and the game repeats them. On a level change it re-checks the tiers: quits the old quest and takes the new one; a quest the server refuses (InQuest stays false) drops to the tier below until the next level-up. Boss quests are not included. | Yes (quest 001: a kill every ~3 s, repeats on its own) |
+| Auto Farm Quest | Takes the highest regular kill quest for your level (001 Bandit Lv 0 ... 026 Special Student Lv 190), quits any other active quest, accepts remotely, flies to the quest area and attacks with remote M1 from Attack Height studs above the target, facing down (out of melee reach; ranged enemies will still hit, see the docs). Equips the **Weapon Slot** (1-0) hotbar key when you hold nothing; needs Roblox focused. Quests complete at N/N and the game repeats them. On a level change it re-checks the tiers: quits the old quest and takes the new one; a quest the server refuses (InQuest stays false) drops to the tier below until the next level-up. Boss quests are not included. | Yes (quest 001: a kill every ~3 s, repeats on its own) |
 | Auto Farm Fruits | Flies to a spawned world fruit, stands on it and presses E. Pauses Auto Farm Quest meanwhile. | No (no fruit spawned while testing) |
 | Auto Store Fruits | Stores every fruit tool in the backpack or hand. | No |
 | Auto Fruit Gacha / Roll Gacha Now | Sends Luzefe's spin request whenever the game allows a roll (money and cooldown). | No (a roll spends money) |
-| Settings | Fly speed (flights over 300 studs are capped at 250 studs/s), attack distance, swings per second. | |
+| Settings | Fly speed (flights over 300 studs are capped at 250 studs/s), attack height (0 = stand in front), attack distance (height 0 only), swings per second. | |
 
 ## Layout
 

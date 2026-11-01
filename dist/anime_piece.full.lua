@@ -1502,6 +1502,23 @@ function loadUEAdapter()
             return enhanceControl(id, button)
         end
 
+        -- Text box (UE GroupMethods:AddInput). Numeric = true only takes the
+        -- digit keys; UE appends each typed key to Value and calls Callback
+        -- with the whole string (Finished = true: only on Enter).
+        function tab:AddInput(id, info)
+            info = info or {}
+            local input = groupFor(self, info):AddInput(id, {
+                Text = info.Text or id,
+                Default = info.Default,
+                Numeric = info.Numeric == true,
+                Finished = info.Finished == true,
+                Placeholder = info.Placeholder,
+                Callback = info.Callback,
+                Tooltip = info.Description,
+            })
+            return enhanceControl(id, input)
+        end
+
         -- Read-only text line (UE GroupMethods:AddLabel(text, wraps)). UE draws
         -- the control's Text field every frame, so writing label.Text updates it.
         -- Not registered in Controls: labels have no value to save or reset.
@@ -1600,6 +1617,7 @@ function loadUEAdapter()
         function popup:AddSlider(...) return page:AddSlider(...) end
         function popup:AddDropdown(...) return page:AddDropdown(...) end
         function popup:AddButton(...) return page:AddButton(...) end
+        function popup:AddInput(...) return page:AddInput(...) end
         function popup:AddPriorityList(...) return page:AddPriorityList(...) end
         function popup:Show() raw:Show(); return self end
         function popup:Hide() raw:Hide(); return self end
@@ -1870,6 +1888,8 @@ S.apGachaNow     = false -- set by the "Roll Now" button, cleared by the loop
 S.apFlySpeed     = 200   -- studs/s; tweenTo caps flights over 300 studs at 250
 S.apAttackRange  = 3     -- studs in front of the target while swinging
 S.apAttackRate   = 2.5   -- swings/s; the game's own M1 cooldown is 0.38 s
+S.apAttackHeight = 6     -- studs above the target, facing down (0 = old spot in front)
+S.apWeaponSlot   = 1     -- hotbar key AFQ presses when nothing is held (1..9, 0 = slot 10)
 S.apPaused       = false -- the fruit farm owns the root (AFQ yields)
 
 Window = Library:CreateWindow({
@@ -1901,6 +1921,16 @@ mainTab:AddToggle("ap_afq", {
     Callback = function(v)
         S.apAfq = v
         notify(v and "Auto Farm Quest ON!" or "Auto Farm Quest OFF!", "laced.club", 2)
+    end
+})
+-- UE appends every typed digit to the box, so the last digit is the slot.
+mainTab:AddInput("ap_weapon_slot", {
+    Text = "Weapon Slot (1-0)", Default = tostring(S.apWeaponSlot), Numeric = true,
+    Placeholder = "1", Column = 1,
+    Description = "Hotbar key of the weapon AFQ equips when you hold nothing (0 = slot 10). Needs Roblox focused.",
+    Callback = function(v)
+        local digit = tonumber(string.match(tostring(v or ""), "(%d)$"))
+        if digit then S.apWeaponSlot = digit end
     end
 })
 S.apAfqLabel = mainTab:AddLabel("ap_afq_status", { Text = "Auto Farm Quest: off", Column = 1 })
@@ -1942,6 +1972,11 @@ settingsTab:AddSlider("ap_fly_speed", {
 settingsTab:AddSlider("ap_attack_range", {
     Text = "Attack Distance", Min = 2, Max = 8, Step = 1, Default = S.apAttackRange, Integer = true, Column = 1,
     Callback = function(v) S.apAttackRange = math.max(2, tonumber(v) or 3) end
+})
+settingsTab:AddSlider("ap_attack_height", {
+    Text = "Attack Height", Min = 0, Max = 10, Step = 1, Default = S.apAttackHeight, Integer = true, Column = 1,
+    Description = "Studs above the enemy while swinging, facing down (hit live at 7, out of reach of melee). 0 = stand in front",
+    Callback = function(v) S.apAttackHeight = math.max(0, tonumber(v) or 6) end
 })
 settingsTab:AddSlider("ap_attack_rate", {
     Text = "Swings Per Second", Min = 1, Max = 2.6, Step = 0.1, Default = S.apAttackRate, Column = 1,
@@ -2109,24 +2144,86 @@ function AP.holdsTool()
     return false
 end
 
+-- Equip the weapon in hotbar slot S.apWeaponSlot (1..9, 0 = slot 10) when
+-- the character holds none: without a tool Combat Event does no damage.
+-- Setting the tool's Parent from the client does not stick (live), so the
+-- slot key is pressed, which only reaches Roblox while it is focused.
+VK_DIGIT0 = 0x30
+-- A slot that brought up no weapon (a fruit, or empty) is not pressed again
+-- for EQUIP_WRONG_WAIT s: each press toggles that tool on and off.
+EQUIP_WRONG_WAIT = 5
+local equipState = { at = -1e9, wait = 0, why = nil }
+
+-- Name of the tool in hand, fruits included (nil when none).
+local function heldToolName()
+    local name
+    pcall(function()
+        for _, child in ipairs(LocalPlayer.Character:GetChildren()) do
+            if child.ClassName == "Tool" then name = child.Name end
+        end
+    end)
+    return name
+end
+
+function AP.equipWeapon()
+    if AP.holdsTool() then return true end
+    local slot = math.floor(tonumber(S.apWeaponSlot) or 1) % 10
+    local now = clock()
+    if now - equipState.at < equipState.wait then return false, equipState.why end
+    if not robloxFocused() then return false, "focus Roblox to equip slot " .. slot end
+    pcall(keypress, VK_DIGIT0 + slot)
+    task.wait(0.1)
+    pcall(keyrelease, VK_DIGIT0 + slot)
+    task.wait(0.3)
+    if AP.holdsTool() then return true end
+    local held = heldToolName()
+    equipState.at, equipState.wait = clock(), EQUIP_WRONG_WAIT
+    equipState.why = held and ("slot %d holds %s, not a weapon: set Weapon Slot"):format(slot, held)
+        or ("slot %d gave no weapon: set Weapon Slot"):format(slot)
+    return false, equipState.why
+end
+
 -- Remote M1, the game's own path (Combat Action): Combat Event:FireServer(n)
--- with the combo step 1..4 and the equipped tool. The server hit box sits in
--- front of the root, so the root is placed AP.range studs in front of the
--- target, facing it, once per swing (a per-frame CFrame write is thousands of
--- memory writes in Matcha). Verified live: Bandit 20 HP -> 0 in 4 swings.
+-- with the combo step 1..4 and the equipped tool. The client sends only the
+-- combo step (no target list, extra args ignored): the server hit box comes
+-- from the root's position and facing. So the root goes S.apAttackHeight
+-- studs straight above the target facing down, where M1 still lands (live:
+-- 7 studs hit, 10 and 15 did not) and the enemies' melee does not (standing
+-- in front lost 23 HP in 2.4 s, overhead lost none). Height 0 keeps the old
+-- spot AP.range studs in front, facing it. Once per swing: a per-frame
+-- CFrame write is thousands of memory writes in Matcha.
+local FACE_DOWN = CFrame.fromOrientation(-math.pi / 2, 0, 0)
+HOVER_DRIFT = 1.5 -- studs the hovering root may sag between swings
 local combo = { step = 0, at = -1e9 }
 function AP.swing(targetRoot)
     local me = AP.root()
     if not me or not targetRoot then return false end
     local now = clock()
     local interval = 1 / math.max(1, tonumber(S.apAttackRate) or 2.5)
-    if now - combo.at < interval then return true end
+    local height = tonumber(S.apAttackHeight) or 0
+    if now - combo.at < interval then
+        -- Between swings gravity pulls the hovering root down into melee
+        -- reach: re-place it once it drifts HOVER_DRIFT studs (a few writes
+        -- a second, not one per frame).
+        if height > 0 and not rootTweenOwned() then
+            local okHold, tpos, mpos = pcall(function() return targetRoot.Position, me.Position end)
+            if okHold and tpos and mpos then
+                local spot = tpos + Vector3.new(0, height, 0)
+                if (mpos - spot).Magnitude > HOVER_DRIFT then placeRoot(me, spot.X, spot.Y, spot.Z, FACE_DOWN) end
+            end
+        end
+        return true
+    end
     local okPos, tpos, look = pcall(function() return targetRoot.Position, targetRoot.CFrame.LookVector end)
     if not okPos or not tpos then return false end
-    local range = tonumber(S.apAttackRange) or 3
-    local spot = tpos + Vector3.new(look.X, 0, look.Z) * range
     if not rootTweenOwned() then
-        placeRoot(me, spot.X, tpos.Y, spot.Z, AP.facing(spot, tpos))
+        if height > 0 then
+            placeRoot(me, tpos.X, tpos.Y + height, tpos.Z, FACE_DOWN)
+        else
+            local range = tonumber(S.apAttackRange) or 3
+            local spot = tpos + Vector3.new(look.X, 0, look.Z) * range
+            placeRoot(me, spot.X, tpos.Y, spot.Z, AP.facing(spot, tpos))
+        end
     end
     -- The game resets the combo after a 1 s gap or the 4th hit.
     if now - combo.at > 1 or combo.step >= 4 then combo.step = 0 end
@@ -2290,12 +2387,13 @@ function afq_fight(quest, model, targetRoot)
         return alive() and S.apAfq and not S.apPaused and AFQ.tracked == quest.id
             and AP.inQuest() and AP.level() == level
     end
-    -- Fly in first; the swing then pins the root next to the target.
+    -- Fly in first, at the hover height; the swing then pins the root above
+    -- (or next to) the target.
     local okPos, tpos = pcall(function() return targetRoot.Position end)
     if not okPos or not tpos then return end
     local me = AP.root()
     if me and (me.Position - tpos).Magnitude > 12 then
-        AP.flyTo(tpos + Vector3.new(0, 3, 0), keep)
+        AP.flyTo(tpos + Vector3.new(0, math.max(3, tonumber(S.apAttackHeight) or 0), 0), keep)
     end
     while keep() and clock() - started < AFQ_TARGET_TIMEOUT do
         local root = AP.enemyRoot(model)
@@ -2367,6 +2465,8 @@ task.spawn(function()
                     end
                     return
                 end
+                local armed, why = AP.equipWeapon()
+                if not armed then setStatus(why) task.wait(0.5) return end
                 local done, need = AP.questProgress()
                 setStatus(("%03d %s (%d/%s)"):format(quest.id, model.Name, done, need and tostring(need) or "?"))
                 afq_fight(quest, model, root)

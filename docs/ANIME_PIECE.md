@@ -49,6 +49,32 @@ only send `{"Quest", "003"}`. At Lv 21 the server refused 007 (Lv 45) and 026 (L
 | `Physical Fruits Event` | `FireServer("Eat"|"Drop"|"Storage", fruitName)` | act on a fruit tool you hold |
 | `Fruit Notifier Event` | server -> client `(fruitName, position)` / `("Colleted")` | world fruit spawned / taken |
 
+## Combat and safe positioning
+
+- **No remote hit.** The game's `ReplicatedStorage.Client.Actions["Combat Action"]` only sends
+  `Combat Event:FireServer(comboStep)`. The server builds the hit box from the character's position and
+  facing, and ignores extra arguments (an enemy model, root and position sent from 15 studs up did no damage).
+  So unlike Blox Fruits there is no target list to send, and AFQ must stay inside the hit box.
+- **A tool must be held.** With nothing equipped M1 does no damage at any distance. Moving the tool's
+  `Parent` to the character from the client does not stick; pressing the hotbar key works, but only while
+  Roblox is the focused window (`keypress` goes to the focused window). AFQ presses the **Weapon Slot** key.
+- **Hover above, facing down** (live 2026-10-31, Higaro's bandit, Melee):
+
+  | Root position | M1 lands | Damage taken |
+  |---|---|---|
+  | straight above, facing down, 15 / 10 studs | no | none |
+  | straight above, facing down, 7 studs | yes (52 -> 38) | none |
+  | 3 studs in front, 6 studs up | yes | yes |
+  | 3 studs in front, ground level | yes | yes (23 HP in 2.4 s) |
+
+  AFQ's default **Attack Height** is 6 (one stud of margin under 7). Height 0 restores the old
+  in-front spot. Between swings the root is re-placed when it sags 1.5 studs, so gravity cannot pull it into
+  melee reach.
+- **Ranged enemies (to revisit).** Hovering only keeps AFQ out of **melee** reach. Higher-level enemies with
+  ranged attacks (projectiles, AoE skills) will still hit a hovering player. When AFQ reaches those tiers,
+  re-measure damage taken per tier and adjust: a larger height if their hit box allows it, dodging between
+  swings, or a health threshold that backs off to heal.
+
 ## World
 
 - Enemies: `Workspace.World.Playability.Enemys`, models named `"<Name> [<level>+]"` (bosses have no tag).

@@ -60,6 +60,16 @@ function AP.boolAttribute(name)
     return value == true
 end
 
+-- Health / MaxHealth of the live character, 0 when there is none.
+function AP.healthFraction()
+    local fraction = 0
+    pcall(function()
+        local hum = LocalPlayer.Character:FindFirstChild("Humanoid")
+        if hum and hum.MaxHealth > 0 then fraction = hum.Health / hum.MaxHealth end
+    end)
+    return fraction
+end
+
 -- InQuest (bool attribute, safe to read) flips true on an accept the server
 -- took and false on Quit; a rejected accept (level too low) leaves it false.
 function AP.inQuest() return AP.boolAttribute("InQuest") end

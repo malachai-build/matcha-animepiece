@@ -36,6 +36,9 @@ AFQ_ACCEPT_WAIT = 3     -- s for InQuest to flip after an accept or a quit
 AFQ_LOCK_TIME = 120     -- s a refused quest is skipped (a level-up clears it sooner)
 AFQ_TARGET_TIMEOUT = 25 -- s on one enemy before trying another (stuck / unreachable)
 AFQ_AREA_HEIGHT = 25    -- studs above the marker while waiting for respawns
+AFQ_HEAL_HEIGHT = 60    -- studs straight up while healing (far out of the anti-cheat's 10 studs and melee)
+AFQ_HEAL_HOLD = 0.35    -- s between re-places while healing (the root falls ~12 studs in between)
+AFQ_HEAL_TIMEOUT = 90   -- s of healing before fighting again anyway (no regen, or regen stalls)
 
 -- Boss quests whose text contains a mob target ("Defeat Robot King" holds
 -- "Robot"): never read them as that mob's quest.
@@ -133,14 +136,49 @@ function afq_quit()
     return not AP.inQuest()
 end
 
+-- Health guard: a death puts the weapon back in the backpack, and with
+-- Roblox unfocused AFQ cannot equip it again (docs). So below Heal Below %
+-- AFQ leaves the fight straight up and waits for Heal Until %.
+AFQ_HEAL_COOLDOWN = 30  -- s of fighting after a heal that timed out (no climbing 60 studs per try)
+local healBlockedUntil = -1e9
+function afq_needsHeal()
+    local below = tonumber(S.apHealBelow) or 0
+    return below > 0 and clock() >= healBlockedUntil and AP.root() ~= nil and AP.healthFraction() * 100 < below
+end
+
+-- Hold AFQ_HEAL_HEIGHT studs above where the fight was until the health is
+-- back (or AFQ_HEAL_TIMEOUT). One write per AFQ_HEAL_HOLD: no enemy is within
+-- 10 studs up there, so the anti-cheat check does not run.
+function afq_heal()
+    local me = AP.root()
+    if not me then return end
+    local okPos, from = pcall(function() return me.Position end)
+    if not okPos or not from then return end
+    local spot = from + Vector3.new(0, AFQ_HEAL_HEIGHT, 0)
+    local function keep() return alive() and S.apAfq and not S.apPaused and AP.root() ~= nil end
+    AP.flyTo(spot, keep)
+    local started = clock()
+    local untilPct = math.max(tonumber(S.apHealBelow) or 0, tonumber(S.apHealUntil) or 90)
+    while keep() and clock() - started < AFQ_HEAL_TIMEOUT do
+        local pct = AP.healthFraction() * 100
+        if pct >= untilPct then return end
+        setStatus(("healing %d%% -> %d%%"):format(pct, untilPct))
+        local root = AP.root()
+        if root and not rootTweenOwned() then placeRoot(root, spot.X, spot.Y, spot.Z, lockedRotation(root)) end
+        task.wait(AFQ_HEAL_HOLD)
+    end
+    if clock() - started >= AFQ_HEAL_TIMEOUT then healBlockedUntil = clock() + AFQ_HEAL_COOLDOWN end
+end
+
 -- Fight one enemy until it dies, the quest ends, the level changes (a new
--- tier may be open), AFQ is switched off or the fruit farm takes over.
+-- tier may be open), the health guard trips, AFQ is switched off or the
+-- fruit farm takes over.
 function afq_fight(quest, model, targetRoot)
     local started = clock()
     local level = AFQ.level
     local function keep()
         return alive() and S.apAfq and not S.apPaused and AFQ.tracked == quest.id
-            and AP.inQuest() and AP.level() == level
+            and AP.inQuest() and AP.level() == level and not afq_needsHeal()
     end
     -- Fly in to the retreat spot RETREAT_UP studs above the target, outside
     -- the anti-cheat's 10 stud radius (see AP.swing); each swing then drops
@@ -205,6 +243,7 @@ task.spawn(function()
                     end
                     return
                 end
+                if afq_needsHeal() then afq_heal() return end
                 local area = afq_areaPosition(quest)
                 local model, root = AP.nearestEnemy(quest.targetSet, area, AFQ_AREA_RADIUS)
                 if not model then

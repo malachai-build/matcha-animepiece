@@ -133,6 +133,12 @@ No unfocused equip exists in Matcha (all tried live 2026-10-31):
 - `Custom Tool Event:FireServer("Equip")` with an empty hand: M1 still does no damage.
 So staying alive is what keeps AFQ armed while Roblox is unfocused.
 
+**Health guard** (Settings: Heal Below %, default 35, 0 = off; Heal Until %, default 90): below the threshold
+AFQ leaves the fight 60 studs straight up and holds there (one write per 0.35 s; live: nearest enemy 32.9
+studs away, so the anti-cheat check does not run) until Heal Until %, then goes back. After 90 s without
+reaching it, AFQ fights for at least 30 s before healing again (no climbing 60 studs per try). After a death
+anyway, AFQ re-equips the Weapon Slot as soon as Roblox is focused.
+
 Rules AFQ follows now:
 - **Default Attack Height 0** (ground, in front). After each swing (HIT_DWELL 0.2 s) the root steps 12 studs
   out to the ground spot farthest from every live enemy, which resets the check's window (armed: max 3-4

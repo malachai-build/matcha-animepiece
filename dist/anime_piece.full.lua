@@ -1890,6 +1890,8 @@ S.apAttackRange  = 3     -- studs in front of the target while swinging
 S.apAttackRate   = 2.5   -- swings/s; the game's own M1 cooldown is 0.38 s
 S.apAttackHeight = 0     -- studs above the target, facing down; 0 = spot in front (anti-cheat safe, see docs)
 S.apWeaponSlot   = 1     -- hotbar key AFQ presses when nothing is held (1..9, 0 = slot 10)
+S.apHealBelow    = 35    -- % HP that sends AFQ up to heal (0 = never); a death unequips the weapon
+S.apHealUntil    = 90    -- % HP AFQ waits for before fighting again
 S.apPaused       = false -- the fruit farm owns the root (AFQ yields)
 
 Window = Library:CreateWindow({
@@ -1978,6 +1980,16 @@ settingsTab:AddSlider("ap_attack_height", {
     Description = "0 = stand in front (anti-cheat safe). Above 0 hovers facing down: measured at the kick threshold, risky (see docs)",
     Callback = function(v) S.apAttackHeight = math.max(0, tonumber(v) or 0) end
 })
+settingsTab:AddSlider("ap_heal_below", {
+    Text = "Heal Below %", Min = 0, Max = 90, Step = 5, Default = S.apHealBelow, Integer = true, Column = 1,
+    Description = "AFQ leaves the fight 60 studs straight up below this HP (0 = never). A death unequips your weapon, and only a focused Roblox can equip it again",
+    Callback = function(v) S.apHealBelow = math.max(0, tonumber(v) or 35) end
+})
+settingsTab:AddSlider("ap_heal_until", {
+    Text = "Heal Until %", Min = 30, Max = 100, Step = 5, Default = S.apHealUntil, Integer = true, Column = 1,
+    Description = "HP AFQ waits for up there before fighting again (gives up after 90 s)",
+    Callback = function(v) S.apHealUntil = math.max(30, tonumber(v) or 90) end
+})
 settingsTab:AddSlider("ap_attack_rate", {
     Text = "Swings Per Second", Min = 1, Max = 2.6, Step = 0.1, Default = S.apAttackRate, Column = 1,
     Callback = function(v) S.apAttackRate = math.max(1, tonumber(v) or 2.5) end
@@ -2045,6 +2057,16 @@ function AP.boolAttribute(name)
     local value
     pcall(function() value = LocalPlayer:GetAttribute(name) end)
     return value == true
+end
+
+-- Health / MaxHealth of the live character, 0 when there is none.
+function AP.healthFraction()
+    local fraction = 0
+    pcall(function()
+        local hum = LocalPlayer.Character:FindFirstChild("Humanoid")
+        if hum and hum.MaxHealth > 0 then fraction = hum.Health / hum.MaxHealth end
+    end)
+    return fraction
 end
 
 -- InQuest (bool attribute, safe to read) flips true on an accept the server
@@ -2331,6 +2353,9 @@ AFQ_ACCEPT_WAIT = 3     -- s for InQuest to flip after an accept or a quit
 AFQ_LOCK_TIME = 120     -- s a refused quest is skipped (a level-up clears it sooner)
 AFQ_TARGET_TIMEOUT = 25 -- s on one enemy before trying another (stuck / unreachable)
 AFQ_AREA_HEIGHT = 25    -- studs above the marker while waiting for respawns
+AFQ_HEAL_HEIGHT = 60    -- studs straight up while healing (far out of the anti-cheat's 10 studs and melee)
+AFQ_HEAL_HOLD = 0.35    -- s between re-places while healing (the root falls ~12 studs in between)
+AFQ_HEAL_TIMEOUT = 90   -- s of healing before fighting again anyway (no regen, or regen stalls)
 
 -- Boss quests whose text contains a mob target ("Defeat Robot King" holds
 -- "Robot"): never read them as that mob's quest.
@@ -2428,14 +2453,49 @@ function afq_quit()
     return not AP.inQuest()
 end
 
+-- Health guard: a death puts the weapon back in the backpack, and with
+-- Roblox unfocused AFQ cannot equip it again (docs). So below Heal Below %
+-- AFQ leaves the fight straight up and waits for Heal Until %.
+AFQ_HEAL_COOLDOWN = 30  -- s of fighting after a heal that timed out (no climbing 60 studs per try)
+local healBlockedUntil = -1e9
+function afq_needsHeal()
+    local below = tonumber(S.apHealBelow) or 0
+    return below > 0 and clock() >= healBlockedUntil and AP.root() ~= nil and AP.healthFraction() * 100 < below
+end
+
+-- Hold AFQ_HEAL_HEIGHT studs above where the fight was until the health is
+-- back (or AFQ_HEAL_TIMEOUT). One write per AFQ_HEAL_HOLD: no enemy is within
+-- 10 studs up there, so the anti-cheat check does not run.
+function afq_heal()
+    local me = AP.root()
+    if not me then return end
+    local okPos, from = pcall(function() return me.Position end)
+    if not okPos or not from then return end
+    local spot = from + Vector3.new(0, AFQ_HEAL_HEIGHT, 0)
+    local function keep() return alive() and S.apAfq and not S.apPaused and AP.root() ~= nil end
+    AP.flyTo(spot, keep)
+    local started = clock()
+    local untilPct = math.max(tonumber(S.apHealBelow) or 0, tonumber(S.apHealUntil) or 90)
+    while keep() and clock() - started < AFQ_HEAL_TIMEOUT do
+        local pct = AP.healthFraction() * 100
+        if pct >= untilPct then return end
+        setStatus(("healing %d%% -> %d%%"):format(pct, untilPct))
+        local root = AP.root()
+        if root and not rootTweenOwned() then placeRoot(root, spot.X, spot.Y, spot.Z, lockedRotation(root)) end
+        task.wait(AFQ_HEAL_HOLD)
+    end
+    if clock() - started >= AFQ_HEAL_TIMEOUT then healBlockedUntil = clock() + AFQ_HEAL_COOLDOWN end
+end
+
 -- Fight one enemy until it dies, the quest ends, the level changes (a new
--- tier may be open), AFQ is switched off or the fruit farm takes over.
+-- tier may be open), the health guard trips, AFQ is switched off or the
+-- fruit farm takes over.
 function afq_fight(quest, model, targetRoot)
     local started = clock()
     local level = AFQ.level
     local function keep()
         return alive() and S.apAfq and not S.apPaused and AFQ.tracked == quest.id
-            and AP.inQuest() and AP.level() == level
+            and AP.inQuest() and AP.level() == level and not afq_needsHeal()
     end
     -- Fly in to the retreat spot RETREAT_UP studs above the target, outside
     -- the anti-cheat's 10 stud radius (see AP.swing); each swing then drops
@@ -2500,6 +2560,7 @@ task.spawn(function()
                     end
                     return
                 end
+                if afq_needsHeal() then afq_heal() return end
                 local area = afq_areaPosition(quest)
                 local model, root = AP.nearestEnemy(quest.targetSet, area, AFQ_AREA_RADIUS)
                 if not model then

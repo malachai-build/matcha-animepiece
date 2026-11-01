@@ -2194,15 +2194,71 @@ end
 -- ~2 samples (after that it drops > 0.75 per sample), so one write per
 -- swing stays under 5. A per-frame hold is not possible: one placeRoot
 -- costs ~38 ms in Matcha.
+--
+-- Armed, even the ground spot trips it: hits knock both bodies around
+-- every sample (mirror: 3-5 per window in 2.5 s; InHit and Stunned are set
+-- by the server during real hits). But a sample with NO enemy within 10
+-- studs resets the window, and a strike is only judged once a window fills
+-- 0.5 s. So HIT_DWELL s after each swing the root steps RETREAT_DIST studs
+-- out from the target along the ground (out of the 10 stud radius, no fall)
+-- and comes back for the next swing: ~4 samples in range per swing, the
+-- window never fills, and half of the time is out of melee reach. Two
+-- writes per swing. (Popping 20 studs up instead lost writes: the server
+-- put the root back, ~100 studs/s of teleports.)
 local FACE_DOWN = CFrame.fromOrientation(-math.pi / 2, 0, 0)
-local combo = { step = 0, at = -1e9 }
+HIT_DWELL = 0.2     -- s next to the target after a swing (the server's hit needs it)
+RETREAT_DIST = 12   -- studs from the target between swings (radius 10 + margin)
+RETREAT_UP = 20     -- studs above the target where AFQ arrives (outside the radius)
+local combo = { step = 0, at = -1e9, retreated = true }
+
+-- Of 8 ground spots RETREAT_DIST studs around the target, the one farthest
+-- from every live enemy: mobs stand in groups, and a spot 12 studs from the
+-- target can be within 10 of its neighbour.
+local RETREAT_DIRS = {}
+for i = 0, 7 do
+    local angle = i * math.pi / 4
+    RETREAT_DIRS[#RETREAT_DIRS + 1] = Vector3.new(math.cos(angle), 0, math.sin(angle))
+end
+function AP.retreatSpot(tpos)
+    local roots = {}
+    pcall(function()
+        for _, model in ipairs(AP.enemyFolder():GetChildren()) do
+            local root = AP.enemyRoot(model)
+            if root then
+                local pos = root.Position
+                if (pos - tpos).Magnitude < RETREAT_DIST + 12 then roots[#roots + 1] = pos end
+            end
+        end
+    end)
+    local best, bestClear = tpos + RETREAT_DIRS[1] * RETREAT_DIST, -1
+    for _, dir in ipairs(RETREAT_DIRS) do
+        local spot = tpos + dir * RETREAT_DIST
+        local clear = math.huge
+        for _, pos in ipairs(roots) do
+            local d = (pos - spot).Magnitude
+            if d < clear then clear = d end
+        end
+        if clear > bestClear then best, bestClear = spot, clear end
+    end
+    return best
+end
 function AP.swing(targetRoot)
     local me = AP.root()
     if not me or not targetRoot then return false end
     local now = clock()
     local interval = 1 / math.max(1, tonumber(S.apAttackRate) or 2.5)
     local height = tonumber(S.apAttackHeight) or 0
-    if now - combo.at < interval then return true end
+    if now - combo.at < interval then
+        if not combo.retreated and now - combo.at >= HIT_DWELL and not rootTweenOwned() then
+            combo.retreated = true
+            local okPos, tpos = pcall(function() return targetRoot.Position end)
+            if okPos and tpos then
+                local spot = AP.retreatSpot(tpos)
+                placeRoot(me, spot.X, tpos.Y, spot.Z, AP.facing(spot, tpos))
+            end
+        end
+        return true
+    end
     local okPos, tpos, look = pcall(function() return targetRoot.Position, targetRoot.CFrame.LookVector end)
     if not okPos or not tpos then return false end
     if not rootTweenOwned() then
@@ -2218,6 +2274,7 @@ function AP.swing(targetRoot)
     if now - combo.at > 1 or combo.step >= 4 then combo.step = 0 end
     combo.step = combo.step + 1
     combo.at = now
+    combo.retreated = false
     markFight()
     return safeRemote("Combat Event", AP.remote("Combat Event"), "FireServer", combo.step)
 end
@@ -2380,13 +2437,14 @@ function afq_fight(quest, model, targetRoot)
         return alive() and S.apAfq and not S.apPaused and AFQ.tracked == quest.id
             and AP.inQuest() and AP.level() == level
     end
-    -- Fly in first, at the hover height; the swing then pins the root above
-    -- (or next to) the target.
+    -- Fly in to the retreat spot RETREAT_UP studs above the target, outside
+    -- the anti-cheat's 10 stud radius (see AP.swing); each swing then drops
+    -- in next to the target and pops back up.
     local okPos, tpos = pcall(function() return targetRoot.Position end)
     if not okPos or not tpos then return end
     local me = AP.root()
-    if me and (me.Position - tpos).Magnitude > 12 then
-        AP.flyTo(tpos + Vector3.new(0, math.max(3, tonumber(S.apAttackHeight) or 0), 0), keep)
+    if me and (me.Position - tpos).Magnitude > RETREAT_UP + 2 then
+        AP.flyTo(tpos + Vector3.new(0, RETREAT_UP, 0), keep)
     end
     -- AP.swing writes the root once per swing only (anti-cheat, see there).
     while keep() and clock() - started < AFQ_TARGET_TIMEOUT do

@@ -142,13 +142,14 @@ function afq_fight(quest, model, targetRoot)
         return alive() and S.apAfq and not S.apPaused and AFQ.tracked == quest.id
             and AP.inQuest() and AP.level() == level
     end
-    -- Fly in first, at the hover height; the swing then pins the root above
-    -- (or next to) the target.
+    -- Fly in to the retreat spot RETREAT_UP studs above the target, outside
+    -- the anti-cheat's 10 stud radius (see AP.swing); each swing then drops
+    -- in next to the target and pops back up.
     local okPos, tpos = pcall(function() return targetRoot.Position end)
     if not okPos or not tpos then return end
     local me = AP.root()
-    if me and (me.Position - tpos).Magnitude > 12 then
-        AP.flyTo(tpos + Vector3.new(0, math.max(3, tonumber(S.apAttackHeight) or 0), 0), keep)
+    if me and (me.Position - tpos).Magnitude > RETREAT_UP + 2 then
+        AP.flyTo(tpos + Vector3.new(0, RETREAT_UP, 0), keep)
     end
     -- AP.swing writes the root once per swing only (anti-cheat, see there).
     while keep() and clock() - started < AFQ_TARGET_TIMEOUT do

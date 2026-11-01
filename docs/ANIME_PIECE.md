@@ -124,6 +124,15 @@ hand 20 s with no actions). After a respawn AFQ can only re-equip with the Weapo
 Roblox focused. Bandits stun-lock: 15 damage every 0.4 s with `Stunned` on our character, which also keeps
 the anti-cheat from striking (it requires us not Stunned).
 
+No unfocused equip exists in Matcha (all tried live 2026-10-31):
+- `keypress` / `mouse1click` go to the focused window, also after `setrobloxinput(true)`.
+- `tool.Parent = Character` only rewrites the parent pointer: `tool.Parent` reads the character but the
+  character's children never list it (restore it to the Backpack at once).
+- No `EquipTool`, `firesignal` or `getconnections`; `run_secure` / `create_run_secure` only load Matcha's
+  encrypted script packages into the same VM.
+- `Custom Tool Event:FireServer("Equip")` with an empty hand: M1 still does no damage.
+So staying alive is what keeps AFQ armed while Roblox is unfocused.
+
 Rules AFQ follows now:
 - **Default Attack Height 0** (ground, in front). After each swing (HIT_DWELL 0.2 s) the root steps 12 studs
   out to the ground spot farthest from every live enemy, which resets the check's window (armed: max 3-4

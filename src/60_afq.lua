@@ -148,6 +148,7 @@ function afq_fight(quest, model, targetRoot)
     if me and (me.Position - tpos).Magnitude > 12 then
         AP.flyTo(tpos + Vector3.new(0, math.max(3, tonumber(S.apAttackHeight) or 0), 0), keep)
     end
+    -- AP.swing writes the root once per swing only (anti-cheat, see there).
     while keep() and clock() - started < AFQ_TARGET_TIMEOUT do
         local root = AP.enemyRoot(model)
         if not root then return end

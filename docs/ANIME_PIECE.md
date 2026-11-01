@@ -71,13 +71,53 @@ only send `{"Quest", "003"}`. At Lv 21 the server refused 007 (Lv 45) and 026 (L
   | 3 studs in front, 6 studs up | yes | yes |
   | 3 studs in front, ground level | yes | yes (23 HP in 2.4 s) |
 
-  AFQ's default **Attack Height** is 6 (one stud of margin under 7). Height 0 restores the old
-  in-front spot. Between swings the root is re-placed when it sags 1.5 studs, so gravity cannot pull it into
-  melee reach.
+  **Attack Height** above 0 hovers (one run hit at 7; later runs were
+  after the kick below and prove nothing). The default is 0, the in-front spot: see the anti-cheat section
+  for why hovering is at the kick threshold.
 - **Ranged enemies (to revisit).** Hovering only keeps AFQ out of **melee** reach. Higher-level enemies with
   ranged attacks (projectiles, AoE skills) will still hit a hovering player. When AFQ reaches those tiers,
   re-measure damage taken per tier and adjust: a larger height if their hit box allows it, dodging between
   swings, or a health threshold that backs off to heal.
+
+## Anti-cheat: "Auto Enemys Farme" kick
+
+`ReplicatedStorage.Client["Client Anti Exploiter"]["Anti Enemy Weld"]` (client side). We were kicked by it on
+2026-10-31 ("performing a suspicious action") ~2.5 s into a hovering AFQ fight. What it does, every 0.05 s
+on Heartbeat:
+
+1. `Humanoid.MoveDirection.Magnitude > 0.1` (walking by input) resets everything.
+2. Takes the nearest live enemy whose root is **within 10 studs**; none resets.
+3. Counts the sample when **our root moved > 0.1 stud** since the last sample, **the distance to the enemy
+   changed <= 0.75**, and **our offset to the enemy changed > 0.1**.
+4. Every 0.5 s: if the count is **>= 5** and the enemy has a `Stunned` child, we hold a Tool, have an `InHit`
+   child, and are not `Stunned` / `Fly` attribute / `SkillMover` / `SkillMoverModify` / `Dash`: **one strike**.
+5. **5 strikes** (never reset until rejoin) -> `Remotes["Kick Event"]:FireServer("Auto Enemys Farme")`.
+
+What tripped it: the hover re-placed the root only after a 1.5 stud sag, so the root fell ~0.25 stud per
+sample in between (~8 counted samples per window, a strike every window while hits landed). Unarmed tests
+never counted (no Tool).
+
+Measured with a copy of the check run beside AFQ (unarmed, so no real strike was possible):
+
+| AFQ positioning | Max counted samples per 0.5 s (strike at 5) | In the air |
+|---|---|---|
+| hover, re-place after 1.5 stud sag (what got us kicked) | 10 | yes |
+| hover, one write per swing, free fall between | **5** (at the threshold) | 36 % |
+| ground, 3 studs in front, one write per swing | **1** | no |
+
+What does not work around it:
+- A per-frame hold: one `placeRoot` costs ~38 ms in Matcha (20 calls took 759 ms), so Heartbeat cannot keep
+  the spot.
+- The `Fly` exemption: Matcha's `SetAttribute` only changes existing attributes; `Fly` does not exist on the
+  character, and setting it reads back `nil`.
+- Standing on an enemy: only its Torso has CanCollide, and the character slid straight off (no
+  player-enemy collision).
+
+Rules AFQ follows now:
+- **Default Attack Height 0** (ground, in front, one write per swing). Above 0 is kept as an option, marked risky.
+- Waiting for respawns happens 25 studs above the marker: farther than 10 studs from any enemy.
+- Any new movement near enemies must keep < 5 moved samples per 0.5 s (or stay > 10 studs away).
+- Melee damage on the ground is still open: see the ranged-enemy note above.
 
 ## World
 

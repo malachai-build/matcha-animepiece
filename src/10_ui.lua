@@ -17,7 +17,7 @@ S.apGachaNow     = false -- set by the "Roll Now" button, cleared by the loop
 S.apFlySpeed     = 200   -- studs/s; tweenTo caps flights over 300 studs at 250
 S.apAttackRange  = 3     -- studs in front of the target while swinging
 S.apAttackRate   = 2.5   -- swings/s; the game's own M1 cooldown is 0.38 s
-S.apAttackHeight = 6     -- studs above the target, facing down (0 = old spot in front)
+S.apAttackHeight = 0     -- studs above the target, facing down; 0 = spot in front (anti-cheat safe, see docs)
 S.apWeaponSlot   = 1     -- hotbar key AFQ presses when nothing is held (1..9, 0 = slot 10)
 S.apPaused       = false -- the fruit farm owns the root (AFQ yields)
 
@@ -104,8 +104,8 @@ settingsTab:AddSlider("ap_attack_range", {
 })
 settingsTab:AddSlider("ap_attack_height", {
     Text = "Attack Height", Min = 0, Max = 10, Step = 1, Default = S.apAttackHeight, Integer = true, Column = 1,
-    Description = "Studs above the enemy while swinging, facing down (hit live at 7, out of reach of melee). 0 = stand in front",
-    Callback = function(v) S.apAttackHeight = math.max(0, tonumber(v) or 6) end
+    Description = "0 = stand in front (anti-cheat safe). Above 0 hovers facing down: measured at the kick threshold, risky (see docs)",
+    Callback = function(v) S.apAttackHeight = math.max(0, tonumber(v) or 0) end
 })
 settingsTab:AddSlider("ap_attack_rate", {
     Text = "Swings Per Second", Min = 1, Max = 2.6, Step = 0.1, Default = S.apAttackRate, Column = 1,

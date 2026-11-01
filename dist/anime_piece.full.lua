@@ -1888,7 +1888,7 @@ S.apGachaNow     = false -- set by the "Roll Now" button, cleared by the loop
 S.apFlySpeed     = 200   -- studs/s; tweenTo caps flights over 300 studs at 250
 S.apAttackRange  = 3     -- studs in front of the target while swinging
 S.apAttackRate   = 2.5   -- swings/s; the game's own M1 cooldown is 0.38 s
-S.apAttackHeight = 6     -- studs above the target, facing down (0 = old spot in front)
+S.apAttackHeight = 0     -- studs above the target, facing down; 0 = spot in front (anti-cheat safe, see docs)
 S.apWeaponSlot   = 1     -- hotbar key AFQ presses when nothing is held (1..9, 0 = slot 10)
 S.apPaused       = false -- the fruit farm owns the root (AFQ yields)
 
@@ -1975,8 +1975,8 @@ settingsTab:AddSlider("ap_attack_range", {
 })
 settingsTab:AddSlider("ap_attack_height", {
     Text = "Attack Height", Min = 0, Max = 10, Step = 1, Default = S.apAttackHeight, Integer = true, Column = 1,
-    Description = "Studs above the enemy while swinging, facing down (hit live at 7, out of reach of melee). 0 = stand in front",
-    Callback = function(v) S.apAttackHeight = math.max(0, tonumber(v) or 6) end
+    Description = "0 = stand in front (anti-cheat safe). Above 0 hovers facing down: measured at the kick threshold, risky (see docs)",
+    Callback = function(v) S.apAttackHeight = math.max(0, tonumber(v) or 0) end
 })
 settingsTab:AddSlider("ap_attack_rate", {
     Text = "Swings Per Second", Min = 1, Max = 2.6, Step = 0.1, Default = S.apAttackRate, Column = 1,
@@ -2182,10 +2182,19 @@ end
 -- studs straight above the target facing down, where M1 still lands (live:
 -- 7 studs hit, 10 and 15 did not) and the enemies' melee does not (standing
 -- in front lost 23 HP in 2.4 s, overhead lost none). Height 0 keeps the old
--- spot AP.range studs in front, facing it. Once per swing: a per-frame
--- CFrame write is thousands of memory writes in Matcha.
+-- spot AP.range studs in front, facing it.
+--
+-- One write per swing, never more, and the hover is NOT held between swings
+-- (the root falls): the game's client check (Client Anti Exploiter["Anti
+-- Enemy Weld"], docs) samples every 0.05 s and, with an enemy within 10
+-- studs, counts a sample when the root moved > 0.1, the distance changed
+-- <= 0.75 and the offset changed > 0.1; 5+ in 0.5 s while hitting is a
+-- strike, 5 strikes a kick. Re-placing after every 1.5 stud sag counted ~8
+-- per window and got us kicked in ~2.5 s. A free fall only counts its first
+-- ~2 samples (after that it drops > 0.75 per sample), so one write per
+-- swing stays under 5. A per-frame hold is not possible: one placeRoot
+-- costs ~38 ms in Matcha.
 local FACE_DOWN = CFrame.fromOrientation(-math.pi / 2, 0, 0)
-HOVER_DRIFT = 1.5 -- studs the hovering root may sag between swings
 local combo = { step = 0, at = -1e9 }
 function AP.swing(targetRoot)
     local me = AP.root()
@@ -2193,19 +2202,7 @@ function AP.swing(targetRoot)
     local now = clock()
     local interval = 1 / math.max(1, tonumber(S.apAttackRate) or 2.5)
     local height = tonumber(S.apAttackHeight) or 0
-    if now - combo.at < interval then
-        -- Between swings gravity pulls the hovering root down into melee
-        -- reach: re-place it once it drifts HOVER_DRIFT studs (a few writes
-        -- a second, not one per frame).
-        if height > 0 and not rootTweenOwned() then
-            local okHold, tpos, mpos = pcall(function() return targetRoot.Position, me.Position end)
-            if okHold and tpos and mpos then
-                local spot = tpos + Vector3.new(0, height, 0)
-                if (mpos - spot).Magnitude > HOVER_DRIFT then placeRoot(me, spot.X, spot.Y, spot.Z, FACE_DOWN) end
-            end
-        end
-        return true
-    end
+    if now - combo.at < interval then return true end
     local okPos, tpos, look = pcall(function() return targetRoot.Position, targetRoot.CFrame.LookVector end)
     if not okPos or not tpos then return false end
     if not rootTweenOwned() then
@@ -2389,6 +2386,7 @@ function afq_fight(quest, model, targetRoot)
     if me and (me.Position - tpos).Magnitude > 12 then
         AP.flyTo(tpos + Vector3.new(0, math.max(3, tonumber(S.apAttackHeight) or 0), 0), keep)
     end
+    -- AP.swing writes the root once per swing only (anti-cheat, see there).
     while keep() and clock() - started < AFQ_TARGET_TIMEOUT do
         local root = AP.enemyRoot(model)
         if not root then return end

@@ -118,8 +118,17 @@ What does not work around it:
 
 Decision (2026-10-31): stay on the ground and accept deaths; the character respawns and AFQ continues.
 
+**But a death unequips the weapon** (live: Bomb in hand until HP hit 0, then both tools in the backpack;
+the "nothing held" runs all started at a fresh respawn's 225 HP). There is no idle holster (Bomb stayed in
+hand 20 s with no actions). After a respawn AFQ can only re-equip with the Weapon Slot key, which needs
+Roblox focused. Bandits stun-lock: 15 damage every 0.4 s with `Stunned` on our character, which also keeps
+the anti-cheat from striking (it requires us not Stunned).
+
 Rules AFQ follows now:
-- **Default Attack Height 0** (ground, in front, one write per swing). Above 0 is kept as an option, marked risky.
+- **Default Attack Height 0** (ground, in front). After each swing (HIT_DWELL 0.2 s) the root steps 12 studs
+  out to the ground spot farthest from every live enemy, which resets the check's window (armed: max 3-4
+  counted per window, kill every ~7 s). AFQ arrives 20 studs above each target. Above 0 is kept as an
+  option, marked risky.
 - Waiting for respawns happens 25 studs above the marker: farther than 10 studs from any enemy.
 - Any new movement near enemies must keep < 5 moved samples per 0.5 s (or stay > 10 studs away).
 - Melee damage on the ground is still open: see the ranged-enemy note above.
